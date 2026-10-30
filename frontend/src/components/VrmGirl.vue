@@ -260,16 +260,16 @@ function tryLoadVRM() {
         humanoid: vrm.humanoid,
         em: vrm.expressionManager,
       }
-      // 自动取景
+      // 自动取景：全身入镜
       vrm.scene.updateMatrixWorld(true)
       const box = new THREE.Box3().setFromObject(vrm.scene)
       const h = Math.max(0.5, box.max.y)
-      camera.position.set(0.12, h * 0.80, h * 1.85)
-      camera.lookAt(0, h * 0.70, 0)
+      camera.position.set(0.12, h * 0.78, h * 2.15)
+      camera.lookAt(0, h * 0.52, 0)
       scene.add(vrm.scene)
       // 眼睛注视目标
       lookTarget = new THREE.Object3D()
-      lookTarget.position.set(0, h * 0.62, 1.2)
+      lookTarget.position.set(0, h * 0.55, 1.2)
       scene.add(lookTarget)
       if (vrm.lookAt) vrm.lookAt.target = lookTarget
       const shadow = scene.getObjectByName('__shadow')
@@ -562,8 +562,8 @@ function tick() {
     }
     // 眼睛注视
     if (lookTarget && model) {
-      const h = camera.position.y / 0.8 || 1.4
-      lookTarget.position.set(mouse.x * 0.9, h * 0.62 - mouse.y * 0.35, 1.3)
+      const h = camera.position.y / 0.78 || 1.4
+      lookTarget.position.set(mouse.x * 0.9, h * 0.55 - mouse.y * 0.35, 1.3)
     }
     J.vrm.update(dt)
   } else {

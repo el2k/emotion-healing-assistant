@@ -1,0 +1,41 @@
+/* 全局样式：治愈系柔和风格 */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --primary: #7c6fd0;      /* 薰衣草紫 */
+  --primary-soft: #efeaff;
+  --accent: #f59fb0;       /* 温柔粉 */
+  --bg: #f7f5fb;
+  --card: #ffffff;
+  --text: #3a3545;
+  --text-soft: #8b869b;
+  --border: #ece7f6;
+  --radius: 16px;
+  --shadow: 0 6px 24px rgba(124, 111, 208, 0.08);
+}
+
+body {
+  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+}
+
+a { color: var(--primary); text-decoration: none; }
+
+button { font-family: inherit; cursor: pointer; }
+
+input, textarea { font-family: inherit; }
+
+/* 通用卡片 */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: #dcd5ee; border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }

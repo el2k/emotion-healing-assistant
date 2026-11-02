@@ -46,6 +46,28 @@
         <div class="card stat"><div class="num">{{ info.stats.days_active }}</div><div class="lbl">活跃天数</div></div>
       </div>
 
+      <!-- 我的积分 -->
+      <div class="card block points-card">
+        <div class="pc-left">
+          <h3>🎁 我的积分</h3>
+          <div class="balance">{{ points.balance.toLocaleString() }}</div>
+          <div class="pc-tip">每条消息消耗 {{ points.chat_cost }} 积分 · 每天可免费领 {{ points.daily_amount }} 积分</div>
+        </div>
+        <div class="pc-right">
+          <button class="claim-btn" :disabled="claiming || points.claimed_today" @click="claim">
+            {{ points.claimed_today ? '今日已领取 ✓' : `领取 ${points.daily_amount} 积分` }}
+          </button>
+          <div class="history">
+            <div v-for="(r, i) in points.history.slice(0, 5)" :key="i" class="h-row">
+              <span>{{ reasonText(r.reason) }}</span>
+              <b :class="{ pos: r.delta > 0, neg: r.delta < 0 }">{{ r.delta > 0 ? '+' : '' }}{{ r.delta }}</b>
+              <span class="h-time">{{ fmtTime(r.created_at) }}</span>
+            </div>
+            <div v-if="!points.history.length" class="h-empty">还没有积分记录</div>
+          </div>
+        </div>
+      </div>
+
       <div class="two-col">
         <!-- 修改昵称 -->
         <div class="card block">
@@ -128,6 +150,32 @@ const toastMsg = ref('')
 let toastTimer = null
 
 const emojiList = ['🌙', '🌿', '🌸', '🐳', '🐱', '🐰', '😊', '🍀', '⭐', '🦋']
+
+const points = ref({ balance: 0, claimed_today: false, daily_amount: 100, chat_cost: 2, history: [] })
+const claiming = ref(false)
+const reasonText = (r) => ({ daily_claim: '每日签到', chat: '聊天消耗', admin_adjust: '管理员调整' }[r] || r)
+
+async function loadPoints() {
+  try {
+    const { data } = await api.get('/points/me')
+    points.value = data
+  } catch (e) { /* 忽略 */ }
+}
+
+async function claim() {
+  claiming.value = true
+  try {
+    const { data } = await api.post('/points/claim')
+    toast(data.message)
+    loadPoints()
+  } catch (e) {
+    toast(e.response?.data?.detail || '领取失败')
+  } finally {
+    claiming.value = false
+  }
+}
+
+const fmtTime = (s) => (s ? new Date(s).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '')
 
 function toast(msg) {
   toastMsg.value = msg
@@ -225,7 +273,7 @@ async function doLogout() {
   router.push('/login')
 }
 
-onMounted(() => { load() })
+onMounted(() => { load(); loadPoints() })
 </script>
 
 <style scoped>
@@ -254,6 +302,25 @@ onMounted(() => { load() })
 .emoji-btn { width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--border); background: #fbfaff; font-size: 18px; cursor: pointer; }
 .emoji-btn.active { border-color: var(--primary); background: var(--primary-soft); }
 .clear-btn { border: none; background: transparent; color: var(--text-soft); font-size: 12px; cursor: pointer; margin-left: 4px; }
+
+.points-card { display: flex; gap: 26px; align-items: stretch; flex-wrap: wrap; }
+.pc-left { flex: 1; min-width: 220px; }
+.balance { font-size: 34px; font-weight: 800; color: var(--primary); margin: 10px 0 4px; letter-spacing: .5px; }
+.pc-tip { font-size: 12.5px; color: var(--text-soft); }
+.pc-right { width: 300px; display: flex; flex-direction: column; gap: 10px; }
+.claim-btn {
+  border: none; background: linear-gradient(135deg, var(--primary), var(--accent));
+  color: #fff; border-radius: 10px; padding: 11px 16px; font-size: 14px; font-weight: 600;
+  box-shadow: 0 5px 14px rgba(124,111,208,.28); transition: opacity .15s;
+}
+.claim-btn:disabled { background: #eef0f6; color: #9a94ab; box-shadow: none; cursor: default; }
+.history { background: #faf8ff; border-radius: 10px; padding: 10px 14px; }
+.h-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; padding: 4px 0; color: var(--text-soft); }
+.h-row b { margin-left: auto; font-weight: 700; }
+.h-row b.pos { color: #2f9e6b; }
+.h-row b.neg { color: #d9536b; }
+.h-time { font-size: 11.5px; color: #b9b3c9; white-space: nowrap; }
+.h-empty { font-size: 12.5px; color: var(--text-soft); text-align: center; padding: 8px 0; }
 
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 16px; }
 .stat { padding: 16px; text-align: center; }

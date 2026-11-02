@@ -292,9 +292,12 @@ def test_admin_platform(client):
     # 角色列表带头像与标签
     r = client.get("/api/admin/personas", headers=ah)
     plist = r.json()
-    assert len(plist) == 23
+    assert len(plist) == 30
     assert all(p["avatar"].startswith("/uploads/personas/") for p in plist)
     assert all("tagline" in p for p in plist)
+    healers = [p for p in plist if p["category"] == "心理疗愈室"]
+    assert len(healers) == 7
+    assert all(p["heal_target"] for p in healers)
 
     # 前台角色接口也返回头像
     r = client.get("/api/chat/personas", headers=ah)
@@ -326,7 +329,7 @@ def test_admin_platform(client):
     assert r.status_code == 200
     sysinfo = r.json()
     assert {"db", "uploads", "llm", "counts"} <= set(sysinfo)
-    assert sysinfo["counts"]["personas"] == 23
+    assert sysinfo["counts"]["personas"] == 30
 
     # 普通用户越权访问 → 403
     ut = _token(client, "13988880000")
@@ -334,6 +337,173 @@ def test_admin_platform(client):
     for path in ("/api/admin/overview", "/api/admin/posts",
                  "/api/admin/comments", "/api/admin/system"):
         assert client.get(path, headers=uh).status_code == 403
+
+
+def test_points_knowledge_healroom(client):
+    """积分制度、知识库、心理疗愈室。"""
+    token = _token(client, "13999990000")
+    h = {"Authorization": f"Bearer {token}"}
+
+    # ---- 积分 ----
+    r = client.get("/api/points/me", headers=h)
+    assert r.status_code == 200, r.text
+    pts = r.json()
+    assert pts["balance"] == 999999        # 初始拉满
+    assert pts["daily_amount"] == 100 and pts["chat_cost"] == 2
+    assert pts["claimed_today"] is False
+
+    # 每日领取：第一次成功，第二次 409
+    r = client.post("/api/points/claim", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["balance"] == 1000099
+    r = client.post("/api/points/claim", headers=h)
+    assert r.status_code == 409
+
+    # 聊天消耗积分 + 流水记录
+    sid = client.post("/api/chat/sessions", json={"title": "积分", "persona_id": "nuan"},
+                      headers=h).json()["id"]
+    before = client.get("/api/points/me", headers=h).json()["balance"]
+    r = client.post(f"/api/chat/sessions/{sid}/messages",
+                    json={"content": "今天有点累"}, headers=h)
+    assert r.status_code == 200, r.text
+    after = client.get("/api/points/me", headers=h).json()
+    assert after["balance"] == before - 2
+    assert after["history"][0]["delta"] == -2
+    assert after["history"][0]["reason"] == "chat"
+    assert after["history"][1]["reason"] == "daily_claim"
+
+    # ---- 知识库 ----
+    r = client.get("/api/knowledge/categories", headers=h)
+    assert r.status_code == 200
+    cats = r.json()
+    assert len(cats) == 6
+    assert sum(c["count"] for c in cats) >= 16
+
+    r = client.get("/api/knowledge/articles", headers=h)
+    assert r.json()["total"] >= 16
+    r = client.get("/api/knowledge/articles?category=危机求助", headers=h)
+    assert all(a["category"] == "危机求助" for a in r.json()["items"])
+    r = client.get("/api/knowledge/articles?q=呼吸", headers=h)
+    assert r.json()["total"] >= 1
+
+    aid = client.get("/api/knowledge/articles", headers=h).json()["items"][0]["id"]
+    r = client.get(f"/api/knowledge/articles/{aid}", headers=h)
+    assert r.status_code == 200
+    assert "content" in r.json() and "source" in r.json()
+    v1 = r.json()["views"]
+    r = client.get(f"/api/knowledge/articles/{aid}", headers=h)
+    assert r.json()["views"] == v1 + 1
+    assert client.get("/api/knowledge/articles/999999", headers=h).status_code == 404
+
+    # ---- 心理疗愈室 ----
+    personas_ = client.get("/api/chat/personas", headers=h).json()
+    healers = [p for p in personas_ if p["category"] == "心理疗愈室"]
+    assert len(healers) == 7
+    assert all(p["avatar"].startswith("/uploads/personas/") for p in healers)
+
+    # 专家会话 + 专属语料
+    r = client.post("/api/chat/sessions",
+                    json={"title": "抑郁状态支持", "persona_id": "heal_dep"}, headers=h)
+    assert r.status_code == 200
+    hsid = r.json()["id"]
+    r = client.post(f"/api/chat/sessions/{hsid}/messages",
+                    json={"content": "今天好难过"}, headers=h).json()
+    from app import personas as pm
+    assert r["reply"]["content"] in pm.get("heal_dep")["voice"]["neg"]
+
+    # 疗愈室系统提示必须包含专业守则
+    prompt = pm.system_prompt("heal_dep")
+    for kw in ("心理疗愈室", "不进行任何诊断", "12356", "不追问创伤细节"):
+        assert kw in prompt, kw
+    # 普通角色不含疗愈守则
+    assert "专业守则" not in pm.system_prompt("nuan")
+
+    # ---- 疗愈室数据进入管理平台 ----
+    r = client.post("/api/auth/login", json={"phone": "13800000000", "password": "admin123"})
+    ah = {"Authorization": f"Bearer {r.json()['token']}"}
+    r = client.get("/api/admin/heal?days=90", headers=ah)
+    assert r.status_code == 200, r.text
+    hd = r.json()
+    # 会话与消息被记录
+    assert hd["totals"]["sessions"] >= 1, hd["totals"]
+    assert hd["totals"]["messages"] >= 1, hd["totals"]
+    assert hd["totals"]["users"] >= 1
+    # 7 位专家与对应疾病方向
+    assert len(hd["experts"]) == 7
+    assert any(e["persona_id"] == "heal_dep" and e["sessions"] >= 1 for e in hd["experts"])
+    assert any(t["target"] == "抑郁状态" and t["sessions"] >= 1 for t in hd["by_target"])
+    # 最近会话明细
+    assert any(s["id"] == hsid and s["expert"] for s in hd["recent_sessions"])
+    # 普通用户越权 → 403
+    assert client.get("/api/admin/heal", headers=h).status_code == 403
+
+
+def test_dialog_flow_intelligence(client):
+    """对话智能化 P0：会话轨迹升级、安抚去重、行动卡片、双引擎校验。"""
+    import asyncio as _asyncio
+
+    token = _token(client, "13966661000")
+    h = {"Authorization": f"Bearer {token}"}
+    # 触发知识库入库（供行动卡片检索文章）
+    client.get("/api/knowledge/categories", headers=h)
+
+    r = client.post("/api/chat/sessions", json={"title": "轨迹测试", "persona_id": "hinata"},
+                    headers=h)
+    sid = r.json()["id"]
+
+    # 1) 会话内去重：同一句难过话连发两次，回复不重复（雏田有两条负向语料）
+    r1 = client.post(f"/api/chat/sessions/{sid}/messages",
+                     json={"content": "今天好难过"}, headers=h).json()
+    r2 = client.post(f"/api/chat/sessions/{sid}/messages",
+                     json={"content": "今天好难过"}, headers=h).json()
+    assert r1["flow"]["consecutive_neg"] == 1 and r1["flow"]["level"] == 0, r1["flow"]
+    assert r2["flow"]["consecutive_neg"] == 2, r2["flow"]
+    # 高强度连续负向允许提前升级（level ∈ {1, 2}）
+    assert r2["flow"]["level"] in (1, 2), r2["flow"]
+    assert r1["reply"]["content"] != r2["reply"]["content"], "连续安抚不应重复同一句"
+
+    # 2) 第三轮负向 → 深度陪伴 + 行动卡片（可跳知识库文章）
+    r3 = client.post(f"/api/chat/sessions/{sid}/messages",
+                     json={"content": "我还是很难过，什么都不想做"}, headers=h).json()
+    assert r3["flow"]["level"] == 2 and r3["flow"]["label"] == "深度陪伴", r3["flow"]
+    assert r3["action"] and r3["action"]["kind"] in ("exercise", "heal"), r3["action"]
+    assert r3["action"].get("article_ref"), r3["action"]
+
+    # 3) 危机消息：行动卡片切换为热线，情绪仍命中高危
+    r4 = client.post(f"/api/chat/sessions/{sid}/messages",
+                     json={"content": "我好想消失"}, headers=h).json()
+    assert r4["emotion"]["high_risk"], r4["emotion"]
+    assert r4["action"]["kind"] == "crisis", r4["action"]
+
+    # 4) 双引擎校验：LLM 返回非法值 → 规则引擎接管
+    from app.emotion import analyzer, llm as llm_mod
+
+    async def _fake_bad(text):
+        return {"emotion_type": "不存在的情绪", "polarity": "positive",
+                "score": 5.0, "heal_score": -1.0, "high_risk": [],
+                "suggestion": "", "source": "llm"}
+
+    orig = llm_mod.analyze
+    llm_mod.analyze = _fake_bad
+    try:
+        result = _asyncio.run(analyzer.analyze("我今天特别开心，考试通过啦！"))
+        assert result["emotion_type"] in analyzer.EMOTION_TYPES, result
+        assert 0 <= result["score"] <= 1 and 0 <= result["heal_score"] <= 1, result
+    finally:
+        llm_mod.analyze = orig
+
+    # 5) LLM 漏报危机 → 规则引擎兜底（宁误报不漏报）
+    async def _fake_miss_crisis(text):
+        return {"emotion_type": "中性", "polarity": "neutral",
+                "score": 0.1, "heal_score": 0.1, "high_risk": [],
+                "suggestion": "", "source": "llm"}
+
+    llm_mod.analyze = _fake_miss_crisis
+    try:
+        result = _asyncio.run(analyzer.analyze("我不想活了，好想消失"))
+        assert result["high_risk"], "规则引擎的危机底线必须保留"
+    finally:
+        llm_mod.analyze = orig
 
 
 if __name__ == "__main__":
@@ -346,4 +516,6 @@ if __name__ == "__main__":
         test_calibration(client)
         test_admin_extra(client)
         test_admin_platform(client)
+        test_points_knowledge_healroom(client)
+        test_dialog_flow_intelligence(client)
     print("新功能测试全部通过")

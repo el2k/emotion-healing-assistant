@@ -27,7 +27,7 @@
           <table class="a-table">
             <thead>
               <tr>
-                <th>用户</th><th>角色</th><th>会话 / 消息</th><th>最后活跃</th><th>状态</th><th>注册时间</th><th>操作</th>
+                <th>用户</th><th>角色</th><th>积分</th><th>会话 / 消息</th><th>最后活跃</th><th>状态</th><th>注册时间</th><th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -43,6 +43,7 @@
                   </div>
                 </td>
                 <td><span class="a-tag" :class="u.role === 'admin' ? 'warn' : ''">{{ u.role === 'admin' ? '管理员' : '用户' }}</span></td>
+                <td><b class="pts">{{ (u.points || 0).toLocaleString() }}</b></td>
                 <td>
                   <span class="num">{{ u.sessions }}</span><span class="unit">会话</span>
                   <span class="num" style="margin-left: 10px">{{ u.messages }}</span><span class="unit">消息</span>
@@ -51,6 +52,7 @@
                 <td><span class="a-tag" :class="u.is_active ? 'ok' : 'off'">{{ u.is_active ? '正常' : '已禁用' }}</span></td>
                 <td class="cell-sub">{{ fmtDate(u.created_at) }}</td>
                 <td class="actions">
+                  <button class="a-btn mini ghost" @click="openPoints(u)">积分</button>
                   <button class="a-btn mini ghost" @click="openProfile(u)">画像</button>
                   <button v-if="u.role !== 'admin'" class="a-btn mini ghost" @click="toggleActive(u)">
                     {{ u.is_active ? '禁用' : '启用' }}
@@ -59,7 +61,7 @@
                 </td>
               </tr>
               <tr v-if="!items.length">
-                <td colspan="7"><div class="a-empty"><span class="e-ico">🔍</span>没有匹配的用户</div></td>
+                <td colspan="8"><div class="a-empty"><span class="e-ico">🔍</span>没有匹配的用户</div></td>
               </tr>
             </tbody>
           </table>
@@ -140,6 +142,22 @@
       </div>
     </div>
 
+    <!-- 积分调整弹窗 -->
+    <div v-if="ptsTarget" class="a-modal-mask">
+      <div class="a-modal">
+        <h4>调整积分</h4>
+        <p>{{ ptsTarget.nickname || '未命名' }}（{{ ptsTarget.phone }}）当前积分：
+          <b>{{ (ptsTarget.points || 0).toLocaleString() }}</b></p>
+        <input v-model="ptsDraft" class="a-input" style="width:100%;margin-top:10px"
+               placeholder="输入调整值，如 1000 或 -500" />
+        <p class="pts-hint">正数增加、负数扣除；操作会记入积分流水，便于审计。</p>
+        <div class="a-modal-ft">
+          <button class="a-btn ghost" @click="ptsTarget = null">取消</button>
+          <button class="a-btn" @click="doAdjustPoints">确认调整</button>
+        </div>
+      </div>
+    </div>
+
     <transition name="fade"><div v-if="toastMsg" class="a-toast">{{ toastMsg }}</div></transition>
   </div>
 </template>
@@ -158,6 +176,8 @@ const q = ref('')
 const drawer = ref(null)
 const profile = ref(null)
 const delTarget = ref(null)
+const ptsTarget = ref(null)
+const ptsDraft = ref('')
 const toastMsg = ref('')
 const pieEl = ref(null)
 const lineEl = ref(null)
@@ -196,6 +216,21 @@ async function toggleActive(u) {
   toast(u.is_active ? '已启用该用户' : '已禁用该用户')
 }
 function askDelete(u) { delTarget.value = u }
+
+function openPoints(u) { ptsTarget.value = u; ptsDraft.value = '' }
+async function doAdjustPoints() {
+  const delta = parseInt(ptsDraft.value, 10)
+  if (!delta) { toast('请输入非零整数（正数加，负数扣）'); return }
+  const u = ptsTarget.value
+  ptsTarget.value = null
+  try {
+    const { data } = await api.post(`/admin/users/${u.id}/points`, { delta })
+    toast(`已调整，当前余额 ${data.balance.toLocaleString()}`)
+    load()
+  } catch (e) {
+    toast(e.response?.data?.detail || '调整失败')
+  }
+}
 async function doDelete() {
   const u = delTarget.value
   delTarget.value = null
@@ -258,6 +293,8 @@ onMounted(load)
 
 <style scoped>
 .num { font-weight: 600; color: #4a4360; }
+.pts { color: #b8860b; font-size: 13px; }
+.pts-hint { font-size: 12px; color: var(--text-soft); margin-top: 8px; }
 .unit { font-size: 11.5px; color: var(--text-soft); margin-left: 3px; }
 .u-profile-head { display: flex; align-items: center; gap: 12px; background: #fff; border-radius: 12px; padding: 14px; }
 .up-name { font-size: 15px; font-weight: 700; }

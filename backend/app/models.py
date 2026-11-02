@@ -31,6 +31,7 @@ class User(Base):
     password_hash = Column(String(256), nullable=False)
     role = Column(String(16), default="user")          # user / admin
     is_active = Column(Boolean, default=True)
+    points = Column(Integer, default=999999)            # 积分（聊天消耗，每日可领）
     created_at = Column(DateTime, default=_utcnow)
 
     sessions = relationship("ChatSession", back_populates="user",
@@ -135,4 +136,33 @@ class ForumComment(Base):
     post_id = Column(Integer, ForeignKey("forum_posts.id", ondelete="CASCADE"), index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
     content = Column(Text, default="")
+    created_at = Column(DateTime, default=_utcnow, index=True)
+
+
+class PointsLedger(Base):
+    """积分流水：每日领取 / 聊天消耗 / 管理员调整。"""
+    __tablename__ = "points_ledger"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    delta = Column(Integer, nullable=False)             # 正数增加 / 负数消耗
+    balance = Column(Integer, default=0)                # 变动后余额（冗余，便于审计）
+    reason = Column(String(32), default="")             # daily_claim / chat / admin_adjust
+    note = Column(String(200), default="")
+    created_at = Column(DateTime, default=_utcnow, index=True)
+
+
+class KnowledgeArticle(Base):
+    """情绪知识库文章。"""
+    __tablename__ = "knowledge_articles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(120), nullable=False)
+    category = Column(String(32), index=True)           # 情绪认知 / 减压练习 / 焦虑应对 / 抑郁陪伴 / 睡眠作息 / 危机求助
+    tags = Column(String(200), default="")              # 逗号分隔
+    summary = Column(String(300), default="")
+    content = Column(Text, default="")                  # markdown-lite 正文
+    source = Column(String(200), default="")            # 参考来源
+    read_minutes = Column(Integer, default=3)
+    views = Column(Integer, default=0)
     created_at = Column(DateTime, default=_utcnow, index=True)

@@ -79,7 +79,7 @@ const sort = ref('sessions')
 const kw = ref('')
 const barEl = ref(null)
 let barChart = null
-const categories = ['治愈陪伴', '趣味互动', '3D 陪伴', '动漫角色', '游戏角色']
+const categories = ['治愈陪伴', '趣味互动', '3D 陪伴', '心理疗愈室', '动漫角色', '游戏角色']
 
 const filtered = computed(() => {
   let arr = list.value.filter((p) => {

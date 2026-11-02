@@ -44,6 +44,7 @@ def init_db() -> None:
 _COLUMNS = {
     "users": {
         "avatar": "VARCHAR(255) DEFAULT ''",
+        "points": "INTEGER DEFAULT 999999",
     },
 }
 
@@ -59,3 +60,6 @@ def _ensure_columns() -> None:
             for name, ddl in cols.items():
                 if name not in existing:
                     conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {name} {ddl}'))
+        # 旧数据回填：无积分的用户直接拉满
+        if insp.has_table("users") and "points" in {c["name"] for c in insp.get_columns("users")}:
+            conn.execute(text("UPDATE users SET points = 999999 WHERE points IS NULL"))

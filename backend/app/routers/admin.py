@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -43,6 +44,150 @@ def _media_of(post: ForumPost) -> str:
     return ""
 
 
+# ---------- 疗愈室数据 ----------
+def _heal_personas() -> dict:
+    """疗愈室专家：id -> 人设信息。"""
+    return {p["id"]: p for p in personas.list_personas()
+            if p["category"] == "心理疗愈室"}
+
+
+@router.get("/heal")
+def heal_overview(days: int = Query(90, ge=1, le=3650),
+                  db: Session = Depends(get_db)):
+    """疗愈室运营数据：总量、疾病方向分布、专家使用、高风险用户与最近会话。"""
+    hp = _heal_personas()
+    heal_ids = list(hp.keys())
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    if not heal_ids:
+        return {"totals": {}, "by_target": [], "experts": [],
+                "risk_users": [], "recent_risk": [], "recent_sessions": []}
+
+    # 会话与消息
+    sess = (db.query(ChatSession, User.nickname)
+            .join(User, User.id == ChatSession.user_id)
+            .filter(ChatSession.persona_id.in_(heal_ids))
+            .order_by(ChatSession.updated_at.desc()))
+    all_rows = sess.all()
+    heal_session_ids = [s.id for s, _ in all_rows]
+    msg_counts = {}
+    if heal_session_ids:
+        msg_counts = dict(db.query(Message.session_id, func.count(Message.id))
+                          .filter(Message.session_id.in_(heal_session_ids))
+                          .group_by(Message.session_id).all())
+
+    # 各专家（疾病方向）统计
+    by_persona_sess = dict(db.query(ChatSession.persona_id, func.count(ChatSession.id))
+                           .filter(ChatSession.persona_id.in_(heal_ids))
+                           .group_by(ChatSession.persona_id).all())
+    by_persona_users = dict(
+        db.query(ChatSession.persona_id, func.count(func.distinct(ChatSession.user_id)))
+        .filter(ChatSession.persona_id.in_(heal_ids))
+        .group_by(ChatSession.persona_id).all())
+    by_persona_msgs = dict(
+        db.query(ChatSession.persona_id, func.count(Message.id))
+        .join(Message, Message.session_id == ChatSession.id)
+        .filter(ChatSession.persona_id.in_(heal_ids))
+        .group_by(ChatSession.persona_id).all())
+
+    # 高风险情绪（疗愈室会话内，负向且强度≥0.7）
+    risk_base = (db.query(EmotionRecord, ChatSession.persona_id)
+                 .join(ChatSession, ChatSession.id == EmotionRecord.session_id)
+                 .filter(ChatSession.persona_id.in_(heal_ids),
+                         EmotionRecord.polarity < 0,
+                         EmotionRecord.score >= 0.7))
+    risk_rows = (risk_base.filter(EmotionRecord.created_at >= since)
+                 .order_by(EmotionRecord.created_at.desc()).limit(30).all())
+    risk_by_user = (risk_base.filter(EmotionRecord.created_at >= since)
+                    .order_by(EmotionRecord.created_at.desc()).all())
+    risk_by_persona = {}
+    user_risk = {}
+    for r, pid in risk_by_user:
+        risk_by_persona[pid] = risk_by_persona.get(pid, 0) + 1
+        u = user_risk.setdefault(r.user_id, {"user_id": r.user_id, "count": 0,
+                                              "last": r.created_at, "targets": set()})
+        u["count"] += 1
+        u["targets"].add(pid)
+        if r.created_at > u["last"]:
+            u["last"] = r.created_at
+
+    user_names = {}
+    if user_risk:
+        rows = (db.query(User.id, User.nickname, User.phone)
+                .filter(User.id.in_(list(user_risk.keys()))).all())
+        user_names = {r[0]: (r[1], r[2]) for r in rows}
+
+    total_sessions = len(all_rows)
+    total_messages = sum(msg_counts.get(sid, 0) for sid in heal_session_ids)
+    total_users = len({s.user_id for s, _ in all_rows})
+    heal_emotions = (db.query(func.count(EmotionRecord.id))
+                     .join(ChatSession, ChatSession.id == EmotionRecord.session_id)
+                     .filter(ChatSession.persona_id.in_(heal_ids),
+                             EmotionRecord.created_at >= since).scalar() or 0)
+
+    by_target = {}
+    for pid, p in hp.items():
+        t = p.get("heal_target") or p["name"]
+        d = by_target.setdefault(t, {"target": t, "sessions": 0, "users": 0,
+                                     "messages": 0, "high_risk": 0})
+        d["sessions"] += by_persona_sess.get(pid, 0)
+        d["users"] += by_persona_users.get(pid, 0)
+        d["messages"] += by_persona_msgs.get(pid, 0)
+        d["high_risk"] += risk_by_persona.get(pid, 0)
+    by_target = sorted(by_target.values(), key=lambda x: -x["sessions"])
+
+    experts = [{
+        "persona_id": pid, "name": p["name"], "avatar": p.get("avatar", ""),
+        "emoji": p["emoji"], "work": p["work"], "target": p.get("heal_target", ""),
+        "sessions": by_persona_sess.get(pid, 0),
+        "users": by_persona_users.get(pid, 0),
+        "messages": by_persona_msgs.get(pid, 0),
+        "high_risk": risk_by_persona.get(pid, 0),
+    } for pid, p in hp.items()]
+    experts.sort(key=lambda x: -x["sessions"])
+
+    recent_risk = [{
+        "user_id": r.user_id, "user": user_names.get(r.user_id, ("", ""))[0],
+        "phone": user_names.get(r.user_id, ("", ""))[1],
+        "target": hp.get(pid, {}).get("heal_target", ""),
+        "expert": hp.get(pid, {}).get("name", ""),
+        "emotion": r.emotion_type, "score": round(r.score, 2),
+        "trigger": r.trigger or "", "intent": r.intent or "",
+        "time": r.created_at.isoformat() if r.created_at else None,
+    } for r, pid in risk_rows]
+
+    recent_sessions = [{
+        "id": s.id, "title": s.title, "user_id": s.user_id, "nickname": nickname,
+        "persona_id": s.persona_id,
+        "expert": hp.get(s.persona_id, {}).get("name", ""),
+        "avatar": hp.get(s.persona_id, {}).get("avatar", ""),
+        "target": hp.get(s.persona_id, {}).get("heal_target", ""),
+        "messages": msg_counts.get(s.id, 0),
+        "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+    } for s, nickname in all_rows[:15]]
+
+    return {
+        "totals": {
+            "sessions": total_sessions,
+            "users": total_users,
+            "messages": total_messages,
+            "emotions": heal_emotions,
+            "high_risk": len(risk_by_user),
+        },
+        "by_target": by_target,
+        "experts": experts,
+        "risk_users": [{
+            "user_id": uid, "nickname": user_names.get(uid, ("", ""))[0],
+            "phone": user_names.get(uid, ("", ""))[1],
+            "count": u["count"],
+            "targets": "/".join(hp.get(t, {}).get("heal_target", t) for t in u["targets"]),
+            "last": u["last"].isoformat() if u["last"] else None,
+        } for uid, u in sorted(user_risk.items(), key=lambda kv: -kv[1]["count"])[:10]],
+        "recent_risk": recent_risk,
+        "recent_sessions": recent_sessions,
+    }
+
+
 # ---------- 用户管理 ----------
 @router.get("/users")
 def list_users(q: str = "", page: int = Query(1, ge=1),
@@ -74,6 +219,7 @@ def list_users(q: str = "", page: int = Query(1, ge=1),
             {
                 "id": u.id, "phone": u.phone, "nickname": u.nickname, "role": u.role,
                 "avatar": u.avatar or "", "is_active": u.is_active,
+                "points": u.points or 0,
                 "sessions": sess_rows.get(u.id, 0),
                 "messages": msg_rows.get(u.id, 0),
                 "last_active": (last_rows.get(u.id).isoformat()
@@ -146,6 +292,23 @@ def user_profile(user_id: int, days: int = Query(90, ge=1, le=3650),
     if not db.query(User).filter(User.id == user_id).first():
         raise HTTPException(404, "用户不存在")
     return emotion_service.long_term_profile(db, user_id, days)
+
+
+class PointsAdjustIn(BaseModel):
+    delta: int
+    reason: str = "admin_adjust"
+
+
+@router.post("/users/{user_id}/points")
+def adjust_points(user_id: int, data: PointsAdjustIn,
+                  db: Session = Depends(get_db)):
+    """管理员调整用户积分（正数加、负数扣）。"""
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "用户不存在")
+    from .points import add_points
+    balance = add_points(db, user, data.delta, "admin_adjust", data.reason)
+    return {"ok": True, "balance": balance}
 
 
 # ---------- 情绪档案 ----------
@@ -255,6 +418,7 @@ def persona_usage(db: Session = Depends(get_db)):
             "avatar": p.get("avatar", ""),
             "category": p["category"], "work": p["work"],
             "tagline": p.get("tag", ""), "desc": p.get("desc", ""),
+            "heal_target": p.get("heal_target", ""),
             "sessions": sess_rows.get(pid, 0),
             "messages": msg_rows.get(pid, 0),
             "emotions": emo_rows.get(pid, 0),

@@ -36,6 +36,9 @@
             <div class="bubble">
               <div class="b-text">{{ m.content }}</div>
               <div v-if="m.role === 'user' && m.emotion" class="b-emo">{{ emoIcon(m.emotion) }} {{ m.emotion }}</div>
+              <div v-if="m.action" class="action-chip" @click="doAction(m.action)">
+                {{ m.action.label }}<span v-if="m.action.article_ref"> ›</span>
+              </div>
             </div>
           </div>
           <div v-if="typing" class="msg assistant">
@@ -67,6 +70,7 @@
 
 <script setup>
 import { nextTick, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import VrmGirl from '../components/VrmGirl.vue'
 import { api } from '../api'
 
@@ -128,6 +132,15 @@ function onPoke() {
   showCaption('柚子被戳了一下，缩了缩脖子：唔？戳柚子干嘛啦～')
 }
 
+const router = useRouter()
+
+function doAction(a) {
+  if (a.kind === 'heal') { router.push('/heal'); return }
+  if (a.article_ref) { router.push(`/knowledge/${a.article_ref.id}`); return }
+  if (a.kind === 'crisis') { router.push('/knowledge'); return }
+  showCaption(a.detail || '跟着柚子的节奏，慢慢来～')
+}
+
 function react(emotion, highRisk) {
   const [anim, text] = highRisk ? HIGH : (REACT[emotion] || REACT.中性)
   girlEl.value?.playAnim(anim)
@@ -172,6 +185,7 @@ async function send(preset) {
     const { data } = await api.post(`/chat/sessions/${sessionId}/messages`, { content: text })
     messages.value.push({
       key: `a-${data.reply.id}`, role: 'assistant', content: data.reply.content,
+      action: data.action || null,
     })
     const lastUser = [...messages.value].reverse().find((m) => m.role === 'user')
     if (lastUser) lastUser.emotion = data.emotion.emotion_type
@@ -249,6 +263,12 @@ onMounted(async () => {
 .msg.assistant .bubble { background: #fff; border: 1px solid var(--border); border-top-left-radius: 4px; }
 .msg.user .bubble { background: var(--primary); color: #fff; border-top-right-radius: 4px; }
 .b-emo { font-size: 11.5px; margin-top: 5px; opacity: .85; text-align: right; }
+.action-chip {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 8px;
+  font-size: 12px; color: #5f54a3; background: #f3efff;
+  border: 1px solid #e4ddf8; padding: 5px 11px; border-radius: 16px; cursor: pointer;
+}
+.action-chip:hover { background: #e9e2ff; }
 .typing { display: flex; gap: 4px; align-items: center; padding: 14px 16px; }
 .typing span {
   width: 7px; height: 7px; border-radius: 50%; background: #c9c0e6; animation: tp 1s infinite;

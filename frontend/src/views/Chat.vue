@@ -11,6 +11,8 @@
         <router-link to="/forum">🌱 社区</router-link>
         <router-link to="/personas">🎭 角色</router-link>
         <router-link to="/vrm">🎀 3D</router-link>
+        <router-link to="/knowledge">📖 知识</router-link>
+        <router-link to="/heal">🩺 疗愈</router-link>
       </div>
 
       <button class="new-btn" @click="newSession">＋ 新的倾诉</button>
@@ -48,6 +50,11 @@
           </div>
         </div>
         <div v-if="userMenu" class="user-menu card">
+          <div class="um-points">
+            <span>🎁 积分 <b>{{ points.balance.toLocaleString() }}</b></span>
+            <a v-if="!points.claimed_today" @click.prevent="quickClaim">领 {{ points.daily_amount }}</a>
+            <span v-else class="claimed">今日已领 ✓</span>
+          </div>
           <router-link to="/account">👤 个人信息</router-link>
           <router-link to="/profile">📊 我的情绪档案</router-link>
           <router-link v-if="auth.isAdmin" to="/admin">🛠 进入管理平台</router-link>
@@ -117,6 +124,13 @@
               </span>
               <span v-if="m.calibrated" class="calib-done">已校准</span>
             </div>
+            <div v-if="m.action" class="action-card" @click="doAction(m.action)">
+              <div class="ac-main">
+                <b>{{ m.action.label }}</b>
+                <span v-if="m.action.detail">{{ m.action.detail }}</span>
+              </div>
+              <span class="ac-go">{{ actionGo(m.action) }}</span>
+            </div>
           </div>
         </div>
 
@@ -183,6 +197,24 @@ const router = useRouter()
 const auth = useAuthStore()
 
 const sessions = ref([])
+const points = ref({ balance: 0, claimed_today: false, daily_amount: 100 })
+
+async function loadPoints() {
+  try {
+    const { data } = await api.get('/points/me')
+    points.value = data
+  } catch (e) { /* 忽略 */ }
+}
+
+async function quickClaim() {
+  try {
+    const { data } = await api.post('/points/claim')
+    toast(data.message)
+  } catch (e) {
+    toast(e.response?.data?.detail || '今天已经领过啦')
+  }
+  loadPoints()
+}
 const currentId = ref(null)
 const currentSession = ref(null)
 const messages = ref([])
@@ -194,6 +226,21 @@ const msgBox = ref(null)
 const daily = ref(null)
 const dailyDismissed = ref(false)
 const preview = ref('')
+
+/* 行动卡片：工具 / 知识文章 / 疗愈室 / 热线 */
+function actionGo(a) {
+  if (a.kind === 'heal') return '进入 ›'
+  if (a.kind === 'crisis') return '查看 ›'
+  return a.article_ref ? '阅读 ›' : '跟我做 ›'
+}
+
+function doAction(a) {
+  // 疗愈室优先进入专属页；工具/热线优先文章；无引用时展示步骤提示
+  if (a.kind === 'heal') { router.push('/heal'); return }
+  if (a.article_ref) { router.push(`/knowledge/${a.article_ref.id}`); return }
+  if (a.kind === 'crisis') { router.push('/knowledge'); return }
+  toast(a.detail || '跟着节奏慢慢来就好')
+}
 const fileInput = ref(null)
 const recording = ref(false)
 const showCalib = ref(false)
@@ -332,7 +379,7 @@ async function send() {
     const { data } = await api.post(`/chat/sessions/${currentId.value}/messages`, { content })
     messages.value = messages.value.filter((m) => m.id !== tmpId)
     messages.value.push({ ...data.user_message })
-    messages.value.push({ ...data.reply })
+    messages.value.push({ ...data.reply, action: data.action || null, flow: data.flow || null })
     lastEmotion.value = {
       type: data.emotion.emotion_type,
       polarity: data.emotion.polarity,
@@ -341,10 +388,16 @@ async function send() {
     scrollDown()
   } catch (e) {
     messages.value = messages.value.filter((m) => m.id !== tmpId)
-    toast('发送失败，请重试')
+    draft.value = content
+    if (e.response?.status === 402) {
+      toast(e.response?.data?.detail || '积分不足，请在「个人信息」页领取每日积分')
+    } else {
+      toast('发送失败，请重试')
+    }
   } finally {
     typing.value = false
   }
+  loadPoints()
 }
 
 function pickImage() { fileInput.value?.click() }
@@ -421,6 +474,7 @@ async function loadDaily() {
 
 onMounted(async () => {
   loadDaily()
+  loadPoints()
   try {
     const { data } = await api.get('/chat/personas')
     const m = {}
@@ -445,8 +499,8 @@ onBeforeUnmount(() => { recognition?.stop() })
 .brand { display: flex; align-items: center; gap: 8px; padding: 4px 8px 14px; }
 .brand .logo { font-size: 24px; }
 .brand .title { font-weight: 700; font-size: 17px; color: var(--primary); }
-.nav-links { display: flex; gap: 8px; padding: 0 4px 12px; }
-.nav-links a { flex: 1; text-align: center; font-size: 13px; padding: 7px 0; border-radius: 9px; background: #faf8ff; color: var(--text-soft); }
+.nav-links { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 0 4px 12px; }
+.nav-links a { text-align: center; font-size: 12.5px; padding: 7px 0; border-radius: 9px; background: #faf8ff; color: var(--text-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nav-links a:hover { background: var(--primary-soft); color: var(--primary); }
 .new-btn {
   border: 1px dashed var(--primary); background: var(--primary-soft);
@@ -487,6 +541,14 @@ onBeforeUnmount(() => { recognition?.stop() })
 .user-menu { position: absolute; bottom: 60px; left: 8px; right: 8px; padding: 8px; z-index: 20; }
 .user-menu a { display: block; padding: 9px; border-radius: 8px; font-size: 14px; }
 .user-menu a:hover { background: var(--primary-soft); }
+.um-points {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 10px; margin-bottom: 4px; border-radius: 8px;
+  background: var(--primary-soft); font-size: 13px; color: #5f54a3;
+}
+.um-points b { font-weight: 800; color: var(--primary); }
+.um-points a { display: inline; padding: 3px 10px; font-size: 12px; background: var(--primary); color: #fff !important; border-radius: 12px; }
+.um-points .claimed { font-size: 11.5px; color: #9a8fc0; }
 
 .chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .chat-header {
@@ -550,6 +612,17 @@ onBeforeUnmount(() => { recognition?.stop() })
 .tag.emo.clickable:hover { opacity: 1; }
 .calib-edit { font-size: 10px; margin-left: 3px; }
 .calib-done { font-size: 11px; background: rgba(255,255,255,.28); padding: 1px 7px; border-radius: 8px; }
+
+.action-card {
+  margin-top: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: linear-gradient(135deg, #f3efff, #fdf1f5); border: 1px solid #e4ddf8;
+  border-radius: 12px; padding: 10px 14px; cursor: pointer; transition: transform .15s, box-shadow .15s;
+  max-width: 340px;
+}
+.action-card:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(124,111,208,.16); }
+.ac-main b { display: block; font-size: 13px; color: #5f54a3; }
+.ac-main span { font-size: 12px; color: var(--text-soft); line-height: 1.6; margin-top: 2px; display: block; }
+.ac-go { font-size: 12px; color: var(--primary); flex: none; }
 
 .calib-mask { position: fixed; inset: 0; background: rgba(30,25,45,.45); display: flex;
   align-items: center; justify-content: center; z-index: 150; padding: 20px; }

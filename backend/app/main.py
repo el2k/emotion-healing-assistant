@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from .config import settings
 from .database import SessionLocal, init_db
 from .models import User
-from .routers import admin, auth, chat, emotion, forum
+from .routers import admin, auth, chat, emotion, forum, knowledge, points
 from .security import hash_password
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
@@ -55,6 +55,8 @@ app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(emotion.router)
 app.include_router(forum.router)
+app.include_router(knowledge.router)
+app.include_router(points.router)
 app.include_router(admin.router)
 
 # 图片上传目录（与 routers/chat.py 保持一致：backend/uploads）

@@ -83,6 +83,7 @@ const nav = [
     items: [
       { name: '用户管理', path: '/admin/users', icon: 'users' },
       { name: '情绪分析', path: '/admin/emotions', icon: 'heart' },
+      { name: '疗愈室数据', path: '/admin/heal', icon: 'spark' },
     ],
   },
   {

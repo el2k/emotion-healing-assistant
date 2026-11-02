@@ -92,6 +92,7 @@ const categories = ['治愈陪伴', '趣味互动', '3D 陪伴', '动漫角色',
 const filtered = computed(() => {
   const kw = search.value.trim().toLowerCase()
   return personas.value.filter((p) => {
+    if (p.category === '心理疗愈室') return false  // 疗愈室专家仅从「心理疗愈室」入口进入
     if (activeCat.value && p.category !== activeCat.value) return false
     if (!kw) return true
     return [p.name, p.tag, p.work, p.desc, p.category]
@@ -100,7 +101,9 @@ const filtered = computed(() => {
 })
 
 const popular = computed(() =>
-  [...personas.value].sort((a, b) => (b.chat_count || 0) - (a.chat_count || 0)).slice(0, 6))
+  personas.value
+    .filter((p) => p.category !== '心理疗愈室')
+    .sort((a, b) => (b.chat_count || 0) - (a.chat_count || 0)).slice(0, 6))
 
 async function startChat(p) {
   if (busy) return

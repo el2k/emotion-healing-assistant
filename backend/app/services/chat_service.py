@@ -8,7 +8,7 @@ from ..emotion import analyzer
 from ..emotion import intent as intent_mod
 from ..models import ChatSession, EmotionRecord, Message
 from .. import personas
-from . import emotion_service, llm_reply
+from . import dialog_flow, emotion_service, llm_reply
 
 
 def create_session(db: Session, user_id: int, title: str = "新的对话",
@@ -83,7 +83,18 @@ async def send_user_message(db: Session, user_id: int, session_id: int,
     # 3) 多轮记忆上下文 + 长期画像
     history, profile_text = emotion_service.build_memory_context(db, user_id, session_id)
 
-    # 3.1) 会话所属角色
+    # 3.1) 会话级情绪轨迹与陪伴策略（连续低落 → 升级深度陪伴 + 去重）
+    trajectory = dialog_flow.compute_trajectory(db, session_id,
+                                                current_emotion=emotion)
+    action = dialog_flow.pick_action(trajectory, emotion)
+    if action and action.get("article"):
+        article = dialog_flow.find_article(db, action["article"])
+        if article:
+            action["article_ref"] = article
+    strategy_text = dialog_flow.strategy_prompt_text(trajectory, emotion)
+    length_text = dialog_flow.length_hint(intent)
+
+    # 3.2) 会话所属角色
     session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
     persona_id = session.persona_id if session else "nuan"
 
@@ -94,7 +105,9 @@ async def send_user_message(db: Session, user_id: int, session_id: int,
     else:
         reply, reply_source = await llm_reply.generate(
             emotion, content, history=history, profile_text=profile_text,
-            intent=intent, persona_id=persona_id)
+            intent=intent, persona_id=persona_id,
+            recent_replies=trajectory["recent_replies"],
+            strategy_text=strategy_text, length_text=length_text)
 
     trigger = (content[:60] + "…") if len(content) > 60 else content
 
@@ -159,4 +172,11 @@ async def send_user_message(db: Session, user_id: int, session_id: int,
             "calibration": emotion.get("calibration"),
         },
         "reply_source": reply_source,
+        "flow": {
+            "level": trajectory["level"],
+            "label": trajectory["label"],
+            "consecutive_neg": trajectory["consecutive_neg"],
+            "dominant_emotion": trajectory["dominant_emotion"],
+        },
+        "action": action,
     }

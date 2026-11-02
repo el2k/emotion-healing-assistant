@@ -112,5 +112,10 @@ async def send(session_id: int, data: MessageIn,
     _own_session(db, user, session_id)
     if not data.content.strip() and not data.image_url:
         raise HTTPException(400, "消息内容不能为空")
+    # 积分消耗：每条消息 2 积分（余额不足时提示领取每日积分）
+    from .points import try_consume, CHAT_COST
+    if not try_consume(db, user, CHAT_COST, "chat", note=f"会话 {session_id}"):
+        raise HTTPException(402, f"积分不足（当前 {user.points or 0}），"
+                                 "请在「个人信息」页领取每日 100 免费积分后再聊～")
     return await chat_service.send_user_message(
         db, user.id, session_id, data.content, data.msg_type, data.image_url)

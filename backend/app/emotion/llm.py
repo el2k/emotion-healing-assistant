@@ -68,11 +68,17 @@ async def analyze(user_message: str) -> dict | None:
         data = _parse(content)
         if not data:
             return None
+        # 双引擎校验前的基本清洗：只接受合法值，非法/缺失回落到 None（由规则引擎接管）
+        def _f(v, default):
+            try:
+                return max(0.0, min(1.0, float(v)))
+            except (TypeError, ValueError):
+                return default
         return {
             "emotion_type": data.get("emotion_type", "中性"),
             "polarity": data.get("polarity", "neutral"),
-            "score": float(data.get("confidence", 0.5)),
-            "heal_score": float(data.get("heal_score", 0.4)),
+            "score": _f(data.get("score", data.get("confidence")), 0.5),
+            "heal_score": _f(data.get("heal_score"), 0.4),
             "high_risk": [data.get("high_risk", "")] if data.get("high_risk") else [],
             "suggestion": data.get("suggestion", ""),
             "source": "llm",

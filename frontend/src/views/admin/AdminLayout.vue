@@ -90,6 +90,7 @@ const nav = [
     label: '内容与角色',
     items: [
       { name: '角色运营', path: '/admin/personas', icon: 'masks' },
+      { name: '提示词管理', path: '/admin/prompts', icon: 'sliders' },
       { name: '社区审核', path: '/admin/forum', icon: 'message' },
       { name: '会话抽查', path: '/admin/sessions', icon: 'layers' },
     ],

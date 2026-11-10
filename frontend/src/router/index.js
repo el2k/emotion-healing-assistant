@@ -26,6 +26,7 @@ const routes = [
       { path: 'emotions', name: 'admin-emotions', component: () => import('../views/admin/Emotions.vue'), meta: { title: '情绪分析' } },
       { path: 'heal', name: 'admin-heal', component: () => import('../views/admin/Heal.vue'), meta: { title: '疗愈室数据' } },
       { path: 'personas', name: 'admin-personas', component: () => import('../views/admin/Personas.vue'), meta: { title: '角色运营' } },
+      { path: 'prompts', name: 'admin-prompts', component: () => import('../views/admin/Prompts.vue'), meta: { title: '提示词管理' } },
       { path: 'forum', name: 'admin-forum', component: () => import('../views/admin/Forum.vue'), meta: { title: '社区审核' } },
       { path: 'sessions', name: 'admin-sessions', component: () => import('../views/admin/Sessions.vue'), meta: { title: '会话抽查' } },
       { path: 'observability', name: 'admin-observability', component: () => import('../views/admin/Observability.vue'), meta: { title: '可观测性' } },

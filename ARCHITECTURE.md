@@ -43,7 +43,10 @@ emotion-healing-assistant/
 │   │   │   ├── ziwei.py       #   紫微斗数安星、十二宫、三方四正、生年四化；流年盘（指定宫为流年命宫重排+流年四化落宫）
 │   │   │   └── daily.py       #   每日运势（确定性种子）
 │   │   │
-│   │   ├── personas.py        # 30 位角色人设卡（结构化 dict list）
+│   │   ├── personas.py        # 角色人设加载/组装/在线编辑（数据外置见 prompts/personas.md，解析失败回退内置默认）
+│   │   ├── prompts/            # ◆ 提示词数据目录（compose 挂载持久化）
+│   │   │   ├── personas.md    #   30 位角色卡人设（唯一数据源，管理后台可在线编辑）
+│   │   │   └── history/       #   每次修改自动备份（滚动保留 50 份，不进镜像）
 │   │   ├── knowledge_data.py  # 情绪知识库 17 篇文章（首次启动自动入库）
 │   │   │
 │   │   ├── services/          # ◆ 业务逻辑层
@@ -67,7 +70,7 @@ emotion-healing-assistant/
 │   │       ├── fortune.py     #   测测专区
 │   │       ├── points.py      #   积分
 │   │       ├── profile.py     #   画像+记忆维基
-│   │       └── admin.py       #   管理平台（看板/用户/情绪/疗愈室/审核/系统）
+│   │       └── admin.py       #   管理平台（看板/用户/情绪/疗愈室/审核/系统/模型池/提示词管理）
 │   │
 │   ├── tests/                 # 四个测试文件（见 §7）
 │   ├── uploads/               # 用户上传的头像/帖子图 + personas/ 角色立绘
@@ -214,7 +217,7 @@ emotion-healing-assistant/
 
 | 场景 | 动哪些文件 |
 |---|---|
-| **加一个聊天角色** | `personas.py` dict 里加一个 → 自动有 avatar（放 `uploads/personas/{id}.jpg`）→ 测试 `test_features.py` 更新角色数断言 |
+| **加一个聊天角色** | `backend/prompts/personas.md` 加一个角色块（或管理后台「提示词管理」页新增）→ 自动有 avatar（放 `uploads/personas/{id}.jpg`）→ 热生效无需重启 → 测试 `test_features.py` 更新角色数断言 |
 | **加一个管理页** | `routers/admin.py` 加 endpoint → `views/admin/` 新建 Vue 页 → `AdminLayout.vue` 加侧栏菜单 → `router/index.js` 加 admin 子路由 |
 | **加一个前台页面** | `views/` 新建 Vue 页 → `router/index.js` 加路由 → `Chat.vue` 侧栏加链接 |
 | **改情绪识别** | 加词 → `emotion/lexicon.py`；改权重 → `rule_engine.py`；加类别 → 两个文件同步 |
@@ -292,7 +295,7 @@ DB_PATH=sqlite:///backend/data/healing.db
 | `services/` | 业务逻辑、数据查询与写入 | 不直接读 request/response |
 | `emotion/` `fortune/` | 纯计算引擎（无 IO） | 不依赖 FastAPI / Session |
 | `models.py` | 只定义表结构 | 不写查询 |
-| `personas.py` | 数据配置（角色卡） | 不写逻辑 |
+| `personas.py` | 人设加载/组装/在线编辑逻辑 | 角色卡数据在 `prompts/personas.md`，不要写在代码里 |
 
 **数据流单一方向**：`routers → services → models/DB`，引擎模块（emotion/fortune）被 services 调用但不反向依赖。
 

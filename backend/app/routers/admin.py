@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -1019,3 +1019,113 @@ def llm_usage_stats(days: int = Query(7, ge=1, le=90),
                        if r.created_at else None),
     } for r in recent_rows]
     return {"days": days, "by_day": by_day, "by_model": by_model, "recent": recent}
+
+
+# ============================================================
+# 提示词管理：角色卡外置 markdown（在线编辑 / 预览 / 备份恢复）
+# ============================================================
+class PersonaPromptPatchIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")   # 传入不可编辑字段（如 id）直接 422
+
+    name: str | None = None
+    emoji: str | None = None
+    tag: str | None = None
+    desc: str | None = None
+    color: str | None = None
+    personality: str | None = None
+    speech: str | None = None
+    catchphrases: list[str] | None = None
+    cares: str | None = None
+    voice: dict[str, list[str]] | None = None
+
+
+class PromptSourceIn(BaseModel):
+    text: str = Field(..., min_length=10)
+
+
+class PromptPreviewIn(BaseModel):
+    persona_id: str = "nuan"
+    patch: dict = {}
+
+
+class PromptRestoreIn(BaseModel):
+    filename: str
+
+
+@router.get("/prompts/overview")
+def prompts_overview():
+    """提示词管理总览：源文件信息 + 安全守则（只读）+ 备份列表 + 角色索引。"""
+    src = personas.get_prompt_source()
+    return {
+        "file": {"path": src["path"], "updated_at": src["updated_at"],
+                 "personas": src["personas"], "source_mode": personas._SOURCE_MODE},
+        "guards": personas.guards_text(),
+        "backups": personas.list_prompt_backups()[:20],
+        "personas": [{"id": p["id"], "name": p["name"], "emoji": p.get("emoji", ""),
+                      "category": p["category"], "tag": p.get("tag", ""),
+                      "heal_target": p.get("heal_target", "")}
+                     for p in personas.PERSONAS],
+    }
+
+
+@router.get("/prompts/source")
+def prompts_source():
+    """Markdown 源文件全文。"""
+    src = personas.get_prompt_source()
+    return {"text": src["text"], "path": src["path"], "updated_at": src["updated_at"]}
+
+
+@router.put("/prompts/source")
+def prompts_source_save(data: PromptSourceIn):
+    """Markdown 全文保存：校验 → 备份 → 写盘 → 热重载（立即生效，无需重启）。"""
+    try:
+        return personas.save_prompt_source(data.text)
+    except ValueError as e:
+        raise HTTPException(400, f"保存被拒绝：{e}")
+
+
+@router.get("/prompts/persona/{pid}")
+def persona_prompt(pid: str):
+    """单个角色的可编辑字段 + 组装后的完整系统提示词。"""
+    p = personas.get(pid)
+    if not p:
+        raise HTTPException(404, "角色不存在")
+    return {
+        "persona": {k: p.get(k) for k in personas.EDITABLE_FIELDS},
+        "readonly": {"id": p["id"], "category": p["category"], "work": p["work"],
+                     "heal_target": p.get("heal_target", ""),
+                     "model_3d": bool(p.get("model_3d"))},
+        "system_prompt": personas.system_prompt(pid),
+    }
+
+
+@router.put("/prompts/persona/{pid}")
+def persona_prompt_save(pid: str, data: PersonaPromptPatchIn):
+    """表单更新单个角色：校验 → 备份 → 写盘 → 热重载。"""
+    try:
+        r = personas.update_persona(pid, data.model_dump(exclude_none=True))
+        return {**r, "system_prompt": personas.system_prompt(pid)}
+    except KeyError:
+        raise HTTPException(404, "角色不存在")
+    except ValueError as e:
+        raise HTTPException(400, f"保存被拒绝：{e}")
+
+
+@router.post("/prompts/preview")
+def persona_prompt_preview(data: PromptPreviewIn):
+    """不落盘：预览表单补丁应用后的完整系统提示词。"""
+    try:
+        return {"system_prompt": personas.preview_prompt(data.persona_id, data.patch)}
+    except ValueError as e:
+        raise HTTPException(400, f"预览失败：{e}")
+
+
+@router.post("/prompts/restore")
+def prompts_restore(data: PromptRestoreIn):
+    """恢复某个历史备份（恢复前会先备份当前版本）。"""
+    try:
+        return personas.restore_prompt_backup(data.filename)
+    except ValueError as e:
+        raise HTTPException(400, f"恢复被拒绝：{e}")
+    except FileNotFoundError:
+        raise HTTPException(404, "备份不存在")

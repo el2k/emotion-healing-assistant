@@ -973,6 +973,96 @@ def test_llm_usage_recorded(client):
     assert flash["calls_total"] >= 2, flash
 
 
+def test_prompt_management(client):
+    """提示词外置管理：markdown 加载 / 表单编辑热生效 / 预览 / 全文校验 / 备份恢复 / 权限。"""
+    import pathlib
+    import tempfile
+    from copy import deepcopy
+    from app import personas as P
+
+    # 隔离：重定向到临时目录，不污染真实 prompts/personas.md
+    orig_file, orig_hist = P.PROMPTS_FILE, P.HISTORY_DIR
+    tmp = tempfile.mkdtemp(prefix="test_prompts_")
+    P.PROMPTS_FILE = pathlib.Path(tmp) / "personas.md"
+    P.HISTORY_DIR = pathlib.Path(tmp) / "history"
+    try:
+        P._reload(deepcopy(P.DEFAULT_PERSONAS))
+        P._write_file_atomic(P.dump_markdown(P.PERSONAS))
+
+        a = client.post("/api/auth/login", json={"phone": "13800000000", "password": "admin123"})
+        ah = {"Authorization": "Bearer " + a.json()["token"]}
+
+        # 1) 总览：30 角色 + 只读守则
+        r = client.get("/api/admin/prompts/overview", headers=ah)
+        assert r.status_code == 200, r.text
+        ov = r.json()
+        assert ov["file"]["personas"] == 30
+        assert "12356" in ov["guards"]["global"] and "诊断" in ov["guards"]["heal"]
+        assert any(p["id"] == "nuan" for p in ov["personas"])
+
+        # 2) 单角色读取 + 表单编辑热生效（写盘 + 内存立即生效）
+        r = client.get("/api/admin/prompts/persona/nuan", headers=ah)
+        assert r.status_code == 200 and r.json()["system_prompt"].startswith("你现在扮演")
+        before = client.get("/api/admin/prompts/source", headers=ah).json()["text"]
+        r = client.put("/api/admin/prompts/persona/nuan", headers=ah,
+                       json={"personality": "温柔（测试编辑）",
+                             "voice": {"pos": ["测试正向语料"]}})
+        assert r.status_code == 200, r.text
+        assert "温柔（测试编辑）" in r.json()["system_prompt"]
+        assert "温柔（测试编辑）" in P.system_prompt("nuan")
+        assert P.get("nuan")["voice"]["pos"] == ["测试正向语料"]
+        assert "温柔（测试编辑）" in P.PROMPTS_FILE.read_text(encoding="utf-8")  # 已落盘
+
+        # 3) 预览不落盘
+        r = client.post("/api/admin/prompts/preview", headers=ah,
+                        json={"persona_id": "nuan", "patch": {"personality": "只预览不保存"}})
+        assert "只预览不保存" in r.json()["system_prompt"]
+        assert "只预览不保存" not in P.get("nuan")["personality"]
+
+        # 4) 技术字段 422 / 角色不存在 404
+        assert client.put("/api/admin/prompts/persona/nuan", headers=ah,
+                          json={"id": "hack"}).status_code == 422
+        assert client.put("/api/admin/prompts/persona/none", headers=ah,
+                          json={"name": "x"}).status_code == 404
+
+        # 5) 全文保存：字段缺失 400、删除角色被拒、正常保存 200
+        bad = before.replace("- personality: ", "- personality_broken: ", 1)
+        assert client.put("/api/admin/prompts/source", headers=ah,
+                         json={"text": bad}).status_code == 400
+        removed = "\n".join(l for l in before.splitlines() if "## 妈妈" not in l)
+        r = client.put("/api/admin/prompts/source", headers=ah, json={"text": removed})
+        assert r.status_code == 400 and "不能删除" in r.json()["detail"], r.text
+        r = client.put("/api/admin/prompts/source", headers=ah, json={"text": before})
+        assert r.status_code == 200 and r.json()["personas"] == 30
+        assert "温柔（测试编辑）" not in P.system_prompt("nuan")   # 已回到编辑前
+
+        # 6) 备份 + 恢复 + 路径穿越拒绝
+        ov = client.get("/api/admin/prompts/overview", headers=ah).json()
+        assert ov["backups"], "编辑与保存应自动产生备份"
+        name = ov["backups"][0]["name"]
+        assert client.post("/api/admin/prompts/restore", headers=ah,
+                           json={"filename": name}).status_code == 200
+        assert client.post("/api/admin/prompts/restore", headers=ah,
+                           json={"filename": "../../etc/passwd"}).status_code == 400
+
+        # 7) 权限：普通用户 403、未登录 401
+        token = _token(client, "13955557000")
+        uh = {"Authorization": f"Bearer {token}"}
+        assert client.get("/api/admin/prompts/source", headers=uh).status_code == 403
+        assert client.get("/api/admin/prompts/overview").status_code == 401
+
+        # 8) markdown round-trip：规范化往返一致
+        text = P.get_prompt_source()["text"]
+        items = [P._normalize(x) for x in P.parse_markdown(text)]
+        assert len(items) == 30
+        assert P.dump_markdown(items) == text
+    finally:
+        # 恢复真实路径并从真实文件重载（真实文件全程未被本测试触碰）
+        P.PROMPTS_FILE, P.HISTORY_DIR = orig_file, orig_hist
+        P._reload([P._normalize(x) for x in
+                   P.parse_markdown(P.PROMPTS_FILE.read_text(encoding="utf-8"))])
+
+
 if __name__ == "__main__":
     with TestClient(app) as client:
         test_profile_daily_insight(client)
@@ -990,4 +1080,5 @@ if __name__ == "__main__":
         test_fortune_zone(client)
         test_llm_model_pool(client)
         test_llm_usage_recorded(client)
+        test_prompt_management(client)
     print("新功能测试全部通过")

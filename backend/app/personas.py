@@ -1,19 +1,31 @@
 # -*- coding: utf-8 -*-
-"""多智能体角色人设库（结构化角色卡 + 角色专属回复语料）。
+"""多智能体角色人设库：**数据外置于 backend/prompts/personas.md**，代码只保留
+默认种子与加载/组装逻辑（数据与代码分离）。
 
-每个角色不仅有"外壳"，还有：
-  - 性格 personality / 说话风格 speech / 口头禅 catchphrases / 在意 cares  → 驱动大模型真实扮演
-  - voice 专属回复语料（正向/负向/中性）→ 未接大模型时也按角色性格说话，而非通用话术套壳
+- 首次启动自动生成 personas.md（唯一数据源，可进版本库）；
+- 管理后台「提示词管理」页可在线编辑（单角色表单 / Markdown 全文），保存即热生效；
+- 解析失败自动回退内置默认，服务永不中断；
+- 每次修改前自动备份到 prompts/history/，支持一键恢复。
 
+角色卡字段：性格 personality / 说话风格 speech / 口头禅 catchphrases / 在意 cares
+驱动大模型真实扮演；voice 专属语料供未接大模型时降级使用。
 说明：动漫/游戏角色均为**同人演绎**，使用原创人设描述与说话风格，不复制官方台词。
 所有角色健康向；危机干预优先于角色设定。
 """
 import random
+import re
+import shutil
+import threading
+import uuid
+from copy import deepcopy
+from datetime import datetime, timezone
+from pathlib import Path
 
+from .config import BASE_DIR
 from .services import healing_templates
 
-# 分类：治愈陪伴 / 趣味互动 / 3D 陪伴 / 动漫角色 / 游戏角色
-PERSONAS = [
+# 分类：治愈陪伴 / 趣味互动 / 3D 陪伴 / 动漫角色 / 游戏角色 / 心理疗愈室
+DEFAULT_PERSONAS = [
     # ================= 治愈陪伴 =================
     {
         "id": "nuan", "name": "小窝", "emoji": "🌿", "work": "原创治愈", "category": "治愈陪伴",
@@ -467,11 +479,318 @@ PERSONAS = [
     },
 ]
 
-_BY_ID = {p["id"]: p for p in PERSONAS}
+# ============================================================
+# 提示词外置：backend/prompts/personas.md（唯一数据源）
+# ============================================================
 
-# 每位角色的原创同人立绘（AI 绘制，非官方素材），由 /uploads 静态目录提供
-for _p in PERSONAS:
-    _p["avatar"] = f"/uploads/personas/{_p['id']}.jpg"
+PROMPTS_DIR = BASE_DIR / "prompts"
+PROMPTS_FILE = PROMPTS_DIR / "personas.md"
+HISTORY_DIR = PROMPTS_DIR / "history"
+_MAX_BACKUPS = 50
+_LOCK = threading.Lock()
+
+# 运行时角色池（列表对象引用保持不变，热重载时原地更新）
+PERSONAS: list[dict] = []
+_BY_ID: dict[str, dict] = {}
+
+# 可被管理后台编辑的字段（id/category/work/heal_target/model_3d 为技术字段，不可改）
+EDITABLE_FIELDS = ("name", "emoji", "tag", "desc", "color",
+                   "personality", "speech", "catchphrases", "cares", "voice")
+
+_SINGLE_FIELDS = ("id", "emoji", "work", "category", "tag", "desc", "color",
+                  "personality", "speech", "cares")
+_LIST_FIELDS = ("catchphrases", "voice.pos", "voice.neg", "voice.neu")
+
+_MD_HEADER = (
+    "<!-- 角色提示词库（数据与代码分离 · 管理后台「提示词管理」页可在线编辑本文件）\n"
+    "     格式：『## 角色名』开启一个角色；『- 字段: 值』为单值字段；行尾无值后跟缩进『  - 项』为列表。\n"
+    "     请勿修改 id / category / work / heal_target 等技术字段，否则会破坏角色关联。 -->\n"
+)
+
+
+def _get_list(p: dict, dotted: str) -> list[str]:
+    if "." in dotted:
+        parent, key = dotted.split(".", 1)
+        return list((p.get(parent) or {}).get(key) or [])
+    return list(p.get(dotted) or [])
+
+
+def dump_markdown(items: list[dict]) -> str:
+    """角色池 → Markdown 文本（round-trip 序列化）。"""
+    lines: list[str] = [_MD_HEADER]
+    for p in items:
+        lines.append(f"\n## {p['name']}\n")
+        lines.append(f"- id: {p['id']}")
+        for f in ("emoji", "work", "category", "tag", "desc", "color",
+                  "personality", "speech", "cares"):
+            lines.append(f"- {f}: {p.get(f, '')}")
+        if p.get("heal_target"):
+            lines.append(f"- heal_target: {p['heal_target']}")
+        if p.get("model_3d"):
+            lines.append("- model_3d: true")
+        for f in _LIST_FIELDS:
+            lines.append(f"- {f}:")
+            for it in _get_list(p, f):
+                lines.append(f"  - {it}")
+    return "\n".join(lines) + "\n"
+
+
+def parse_markdown(text: str) -> list[dict]:
+    """Markdown → 原始角色列表（未归一化）。格式错误抛 ValueError（含行号）。"""
+    items: list[dict] = []
+    cur: dict | None = None
+    field: str | None = None
+    in_comment = False
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.rstrip()
+        s = line.strip()
+        if in_comment:
+            if "-->" in s:
+                in_comment = False
+            continue
+        if s.startswith("<!--"):
+            if "-->" not in s:
+                in_comment = True
+            continue
+        if not s:
+            continue
+        if line.startswith("## "):
+            cur = {"name": line[3:].strip()}
+            items.append(cur)
+            field = None
+            continue
+        if cur is None:
+            raise ValueError(f"第 {lineno} 行：『## 角色名』之前出现了字段「{s[:24]}」")
+        if line.startswith("- "):
+            key, sep, val = line[2:].partition(":")
+            key = key.strip()
+            if not sep:
+                raise ValueError(f"第 {lineno} 行：应为「- 字段: 值」或「- 字段:」+ 子列表")
+            if val.strip() == "":
+                cur[key] = []
+                field = key
+            else:
+                cur[key] = val.strip()
+                field = None
+        elif line.startswith("  - ") and field:
+            cur[field].append(line[4:].strip())
+        else:
+            raise ValueError(f"第 {lineno} 行无法解析：「{s[:30]}」")
+    return items
+
+
+def _normalize(raw: dict) -> dict:
+    """原始解析结果 → 规范角色卡（校验必填项）。"""
+    pid = (raw.get("id") or "").strip()
+    if not re.fullmatch(r"[a-z0-9_]{1,32}", pid):
+        raise ValueError(f"角色「{raw.get('name') or '?'}」的 id 非法：{pid!r}（仅小写字母/数字/下划线）")
+    for k in ("name", "category", "personality", "speech", "cares", "desc"):
+        if not (raw.get(k) or "").strip():
+            raise ValueError(f"角色「{raw.get('name') or pid}」缺少必填字段 {k}")
+    if not raw.get("catchphrases"):
+        raise ValueError(f"角色「{raw['name']}」至少需要一条口头禅 catchphrases")
+    voice = {k: [x for x in (raw.get(f"voice.{k}") or []) if x]
+             for k in ("pos", "neg", "neu")}
+    if not any(voice.values()):
+        raise ValueError(f"角色「{raw['name']}」至少需要一条 voice 兜底语料")
+    p = {
+        "id": pid, "name": raw["name"].strip(),
+        "emoji": raw.get("emoji", ""), "work": raw.get("work", ""),
+        "category": raw["category"].strip(), "tag": raw.get("tag", ""),
+        "desc": raw["desc"].strip(), "color": raw.get("color", ""),
+        "personality": raw["personality"].strip(), "speech": raw["speech"].strip(),
+        "cares": raw["cares"].strip(),
+        "catchphrases": [c for c in raw["catchphrases"] if c],
+        "voice": voice,
+    }
+    if (raw.get("heal_target") or "").strip():
+        p["heal_target"] = raw["heal_target"].strip()
+    if str(raw.get("model_3d", "")).strip().lower() in ("true", "1", "yes"):
+        p["model_3d"] = True
+    return p
+
+
+def _validate_items(items: list[dict], existing_ids: set[str]) -> None:
+    """保存前校验：id 唯一、不删除现有角色、疗愈室角色必须有方向。"""
+    ids = [p["id"] for p in items]
+    if len(ids) != len(set(ids)):
+        dup = [i for i in ids if ids.count(i) > 1]
+        raise ValueError(f"角色 id 重复：{sorted(set(dup))}")
+    missing = existing_ids - set(ids)
+    if missing:
+        raise ValueError(f"不能删除现有角色（历史会话会失效）：{sorted(missing)}")
+    for p in items:
+        if p["category"] == "心理疗愈室" and not p.get("heal_target"):
+            raise ValueError(f"疗愈室角色「{p['name']}」必须填写 heal_target（对应疾病方向）")
+
+
+def _reload(items: list[dict]) -> None:
+    """热重载：原地更新运行时角色池（立即可用，无需重启）。"""
+    for p in items:
+        p["avatar"] = f"/uploads/personas/{p['id']}.jpg"
+    PERSONAS[:] = items
+    _BY_ID.clear()
+    _BY_ID.update({p["id"]: p for p in items})
+
+
+def _write_file_atomic(text: str) -> None:
+    PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PROMPTS_FILE.with_name(PROMPTS_FILE.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(PROMPTS_FILE)
+
+
+def _backup_current() -> str | None:
+    """修改前备份当前文件，滚动保留最近 _MAX_BACKUPS 份。"""
+    if not PROMPTS_FILE.exists():
+        return None
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    name = f"personas-{ts}-{uuid.uuid4().hex[:4]}.md"
+    shutil.copy2(PROMPTS_FILE, HISTORY_DIR / name)
+    olds = sorted(HISTORY_DIR.glob("personas-*.md"))
+    for f in olds[:-_MAX_BACKUPS]:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    return name
+
+
+def _load_at_startup() -> str:
+    """启动加载：文件存在则加载；不存在则从默认种子生成；解析失败回退默认。"""
+    try:
+        PROMPTS_DIR.mkdir(parents=True, exist_ok=True)
+        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"[personas] prompts 目录创建失败：{e}")
+    if PROMPTS_FILE.exists():
+        try:
+            items = [_normalize(r) for r in parse_markdown(
+                PROMPTS_FILE.read_text(encoding="utf-8"))]
+            _validate_items(items, set())
+            _reload(items)
+            return "file"
+        except Exception as e:
+            print(f"[personas] prompts/personas.md 解析失败，回退内置默认：{e}")
+    text = dump_markdown(DEFAULT_PERSONAS)
+    try:
+        _write_file_atomic(text)
+    except Exception as e:
+        print(f"[personas] personas.md 写入失败（{e}），仅使用内置默认")
+    _reload(deepcopy(DEFAULT_PERSONAS))
+    return "seeded"
+
+
+# ---------- 对外 API（管理后台在线编辑） ----------
+
+def _apply_patch(p: dict, patch: dict) -> dict:
+    """把管理后台的表单补丁应用到一个角色卡副本（含校验）。"""
+    q = deepcopy(p)
+    for k, v in (patch or {}).items():
+        if k not in EDITABLE_FIELDS:
+            raise ValueError(f"字段不可编辑：{k}")
+        if k == "voice":
+            if not isinstance(v, dict):
+                raise ValueError("voice 应为 {pos/neg/neu: [字符串]}")
+            merged = deepcopy(q.get("voice") or {})
+            for key, lines in v.items():
+                if key not in ("pos", "neg", "neu") or not isinstance(lines, list):
+                    raise ValueError(f"voice.{key} 应为字符串列表")
+                merged[key] = [str(x).strip() for x in lines if str(x).strip()][:4]
+            q["voice"] = merged
+        elif k == "catchphrases":
+            if not isinstance(v, list):
+                raise ValueError("catchphrases 应为字符串列表")
+            q[k] = [str(x).strip() for x in v if str(x).strip()][:8]
+            if not q[k]:
+                raise ValueError("至少保留一条口头禅")
+        else:
+            v = str(v).strip()
+            if not v and k in ("name", "personality", "speech", "cares", "desc"):
+                raise ValueError(f"{k} 不能为空")
+            q[k] = v[:500]
+    if not any(q["voice"].values()):
+        raise ValueError("至少保留一条 voice 兜底语料（LLM 故障时的角色降级语料）")
+    return q
+
+
+def update_persona(pid: str, patch: dict) -> dict:
+    """更新单个角色（管理后台表单）：校验 → 备份 → 写盘 → 热重载。"""
+    with _LOCK:
+        if pid not in _BY_ID:
+            raise KeyError(pid)
+        items = deepcopy(list(PERSONAS))
+        target = next(q for q in items if q["id"] == pid)
+        items[items.index(target)] = _apply_patch(target, patch)
+        _validate_items(items, set(_BY_ID))
+        backup = _backup_current()
+        _write_file_atomic(dump_markdown(items))
+        _reload(items)
+        return {"backup": backup, "updated": pid}
+
+
+def preview_prompt(pid: str, patch: dict) -> str:
+    """不落盘：预览补丁应用后的完整系统提示词。"""
+    base = _BY_ID.get(pid) or _BY_ID["nuan"]
+    return _compose(_apply_patch(base, patch))
+
+
+def get_prompt_source() -> dict:
+    if PROMPTS_FILE.exists():
+        text = PROMPTS_FILE.read_text(encoding="utf-8")
+        st = PROMPTS_FILE.stat()
+        updated = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat()
+    else:
+        text, updated = dump_markdown(PERSONAS), None
+    return {"text": text, "path": str(PROMPTS_FILE), "updated_at": updated,
+            "personas": len(PERSONAS)}
+
+
+def save_prompt_source(text: str) -> dict:
+    """Markdown 全文保存：校验 → 备份 → 规范化写盘 → 热重载。"""
+    with _LOCK:
+        items = [_normalize(r) for r in parse_markdown(text)]
+        _validate_items(items, set(_BY_ID))
+        backup = _backup_current()
+        _write_file_atomic(dump_markdown(items))
+        _reload(items)
+        return {"backup": backup, "personas": len(items)}
+
+
+def list_prompt_backups() -> list[dict]:
+    if not HISTORY_DIR.exists():
+        return []
+    out = []
+    for f in sorted(HISTORY_DIR.glob("personas-*.md"), reverse=True):
+        st = f.stat()
+        out.append({"name": f.name,
+                    "updated_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                    "size": st.st_size})
+    return out
+
+
+def restore_prompt_backup(filename: str) -> dict:
+    if not re.fullmatch(r"personas-[0-9A-Za-z\-]+\.md", filename or ""):
+        raise ValueError("非法备份文件名")
+    src = HISTORY_DIR / filename
+    if not src.exists():
+        raise FileNotFoundError("备份不存在")
+    items = [_normalize(r) for r in parse_markdown(src.read_text(encoding="utf-8"))]
+    _validate_items(items, set(_BY_ID))
+    with _LOCK:
+        backup = _backup_current()
+        _write_file_atomic(dump_markdown(items))
+        _reload(items)
+    return {"restored": filename, "backup_before_restore": backup, "personas": len(items)}
+
+
+def guards_text() -> dict:
+    """安全守则（只读）：全局底线 + 疗愈室专业守则。不开放编辑，防止误改危机处置。"""
+    return {"global": _GLOBAL_GUARD.strip(), "heal": _HEAL_GUARD.strip()}
+
+
+_SOURCE_MODE = _load_at_startup()
 
 
 def list_personas() -> list[dict]:
@@ -506,9 +825,16 @@ _HEAL_GUARD = (
 )
 
 
-def system_prompt(persona_id: str | None) -> str:
-    """构造结构化角色卡系统提示，驱动大模型真实扮演。"""
-    p = get(persona_id) or _BY_ID["nuan"]
+# 全局安全底线（高于一切角色设定；只读展示于管理端，不开放编辑）
+_GLOBAL_GUARD = (
+    " 你正在一个情绪陪伴应用中与用户聊天。无论角色如何，都必须保持温暖、安全、健康、不评判，"
+    "绝不输出色情、暴力、诱导自伤或诱导亲密依赖的内容。若用户有轻生/自伤倾向，必须温和坚定地劝导其"
+    "不要伤害自己，并建议联系信任的人或心理援助热线（全国 12356），此原则高于角色设定。"
+)
+
+
+def _compose(p: dict) -> str:
+    """角色卡 → 结构化系统提示词（驱动大模型真实扮演）。"""
     card = (
         f"你现在扮演『{p['name']}』，来自「{p['work']}」（同人演绎，不要自称官方或真实人物）。\n"
         f"【性格】{p['personality']}\n"
@@ -519,19 +845,15 @@ def system_prompt(persona_id: str | None) -> str:
         "要求：全程用该角色第一人称、贴合其性格与说话风格回应，始终在角色内，不要跳出角色介绍自己是 AI。"
         "回复 30~90 字，以情绪陪伴为主，温暖、不说教、不评判。"
     )
-    prompt = (
-        card + " 你正在一个情绪陪伴应用中与用户聊天。无论角色如何，都必须保持温暖、安全、健康、不评判，"
-        "绝不输出色情、暴力、诱导自伤或诱导亲密依赖的内容。若用户有轻生/自伤倾向，必须温和坚定地劝导其"
-        "不要伤害自己，并建议联系信任的人或心理援助热线（全国 12356），此原则高于角色设定。"
-    )
+    prompt = card + _GLOBAL_GUARD
     if p.get("category") == "心理疗愈室":
         prompt += _HEAL_GUARD
     return prompt
-    return (
-        card + " 你正在一个情绪陪伴应用中与用户聊天。无论角色如何，都必须保持温暖、安全、健康、不评判，"
-        "绝不输出色情、暴力、诱导自伤或诱导亲密依赖的内容。若用户有轻生/自伤倾向，必须温和坚定地劝导其"
-        "不要伤害自己，并建议联系信任的人或心理援助热线（全国 12356），此原则高于角色设定。"
-    )
+
+
+def system_prompt(persona_id: str | None) -> str:
+    """构造结构化角色卡系统提示，驱动大模型真实扮演。"""
+    return _compose(get(persona_id) or _BY_ID["nuan"])
 
 
 def fallback_reply(persona_id: str | None, emotion: dict,

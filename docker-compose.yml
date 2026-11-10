@@ -19,6 +19,9 @@ services:
       # SQLite 数据库与用户上传内容持久化到宿主机
       - ./backend/data:/app/backend/data
       - ./backend/uploads:/app/backend/uploads
+      # 角色卡提示词（backend/prompts/personas.md）持久化：
+      # 管理后台「提示词管理」页在线编辑后立即写回宿主机，容器重建不丢
+      - ./backend/prompts:/app/backend/prompts
     healthcheck:
       test:
         - CMD

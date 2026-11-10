@@ -1,7 +1,11 @@
 # 后端
 backend/.venv/
 backend/data/
-backend/uploads/
+# 用户上传内容不入库；角色立绘（personas）纳入版本管理
+backend/uploads/*
+!backend/uploads/personas/
+!backend/uploads/personas/**
+backend/prompts/history/
 backend/__pycache__/
 backend/.env
 *.pyc

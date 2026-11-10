@@ -1,0 +1,27 @@
+# 版本控制与编辑器
+.git
+.gitignore
+.vscode
+
+# Python 虚拟环境与缓存
+backend/.venv
+**/__pycache__
+**/*.pyc
+backend/.pytest_cache
+
+# 前端依赖与构建产物（构建阶段内部生成）
+frontend/node_modules
+frontend/dist
+
+# 运行时数据（通过 volume 挂载，不进镜像）
+backend/data
+uploads
+.temp
+
+# 本地密钥配置（通过 env_file 注入）
+backend/.env
+.env
+
+# 文档与素材原图
+assets
+*.md

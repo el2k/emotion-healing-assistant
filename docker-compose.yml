@@ -1,0 +1,31 @@
+services:
+  app:
+    build: .
+    image: emotion-healing-assistant:latest
+    container_name: emotion-healing-assistant
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+      DEBUG: "false"
+      DB_PATH: /app/backend/data/healing.db
+    # 大模型等配置从 backend/.env 读取；文件不存在时 compose 仍可启动
+    env_file:
+      - path: ./backend/.env
+        required: false
+    volumes:
+      # SQLite 数据库与用户上传内容持久化到宿主机
+      - ./backend/data:/app/backend/data
+      - ./backend/uploads:/app/backend/uploads
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3

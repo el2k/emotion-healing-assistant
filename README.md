@@ -163,6 +163,23 @@ npm run build                            # 生成 dist/
 # 重启后端后，直接访问 http://127.0.0.1:8000 即为完整应用
 ```
 
+### 4. Docker 部署
+
+单容器运行：镜像内构建前端 `dist/`，由 FastAPI 一并托管，无需额外 Nginx。
+
+```bash
+docker compose up -d --build             # 构建并后台启动
+# 浏览器访问 http://localhost:8000
+docker compose logs -f                   # 查看日志
+docker compose down                      # 停止并移除容器
+```
+
+- **端口**：宿主机 `8000` → 容器 `8000`（改 `docker-compose.yml` 的 `ports` 可换端口）
+- **数据持久化**：`backend/data/`（SQLite）与 `backend/uploads/`（用户上传内容、角色立绘）通过 volume 挂载到宿主机，重建容器不丢数据
+- **配置注入**：大模型等配置仍放在 `backend/.env`，由 `env_file` 注入容器；文件不存在也能正常启动
+- **健康检查**：容器内置 `GET /api/health` 探针，`docker compose ps` 显示 `healthy`
+- 首次启动自动建库并创建管理员（默认 `13800000000 / admin123`），可在 `backend/.env` 中通过 `ADMIN_PASSWORD`、`JWT_SECRET` 覆盖
+
 ## 配置大模型（可选，强烈推荐）
 
 编辑 `backend/.env`（参照 `.env.example`）：

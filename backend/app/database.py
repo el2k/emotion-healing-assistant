@@ -38,6 +38,19 @@ def init_db() -> None:
     from . import models  # noqa: F401  确保模型已注册
     Base.metadata.create_all(bind=engine)
     _ensure_columns()
+    _seed_llm_models()
+
+
+def _seed_llm_models() -> None:
+    """首次启动时种子 LLM 模型池（表为空才插，不覆盖后台修改）。"""
+    from .services.llm_models import ensure_seed
+    db = SessionLocal()
+    try:
+        ensure_seed(db)
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
 
 
 # 轻量自动迁移：为已存在的表补齐新增列（避免删库丢数据）
@@ -45,6 +58,7 @@ _COLUMNS = {
     "users": {
         "avatar": "VARCHAR(255) DEFAULT ''",
         "points": "INTEGER DEFAULT 999999",
+        "llm_model": "VARCHAR(64) DEFAULT ''",
     },
 }
 

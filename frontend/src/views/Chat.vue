@@ -13,6 +13,7 @@
         <router-link to="/vrm">🎀 3D</router-link>
         <router-link to="/knowledge">📖 知识</router-link>
         <router-link to="/heal">🩺 疗愈</router-link>
+        <router-link to="/fortune">🔮 测测</router-link>
       </div>
 
       <button class="new-btn" @click="newSession">＋ 新的倾诉</button>
@@ -90,6 +91,15 @@
           <div v-if="lastEmotion" class="emotion-badge" :class="lastEmotion.polarity">
             <span>{{ emotionIcon(lastEmotion.type) }}</span> {{ lastEmotion.type }}
           </div>
+          <select v-if="llmModels.length" v-model="selectedModel" class="model-select"
+                  title="选择回复使用的 AI 模型" @change="changeModel">
+            <option v-for="m in llmModels" :key="m.id" :value="m.id">{{ m.name }}</option>
+          </select>
+          <button class="stream-toggle" :class="{ on: streaming }"
+                  :title="streaming ? '流式回复：逐字显示' : '整段回复：一次显示'"
+                  @click="toggleStreaming">
+            {{ streaming ? '⚡ 流式' : '📝 整段' }}
+          </button>
           <router-link to="/profile" class="profile-link">情绪档案</router-link>
           <router-link to="/account" class="profile-link">个人信息</router-link>
         </div>
@@ -116,7 +126,7 @@
           <div class="bubble">
             <img v-if="m.msg_type === 'image' && m.image_url" :src="m.image_url"
                  class="b-img" alt="图片" @click="preview = m.image_url" />
-            <div v-if="m.content" class="b-text">{{ m.content }}</div>
+            <div v-if="m.content" class="b-text">{{ m.content }}<span v-if="m.streaming" class="cursor-inline"></span></div>
             <div v-if="m.role === 'user' && m.emotion_type" class="b-tags">
               <span class="tag emo clickable" title="点击校准情绪" @click="openCalibrate(m)">
                 {{ emotionIcon(m.emotion_type) }} {{ m.emotion_type }}
@@ -198,6 +208,33 @@ const auth = useAuthStore()
 
 const sessions = ref([])
 const points = ref({ balance: 0, claimed_today: false, daily_amount: 100 })
+
+/* ========== AI 模型选择（用户可在聊天页切换） ========== */
+const llmModels = ref([])
+const selectedModel = ref('')
+
+async function loadModels() {
+  try {
+    const { data } = await api.get('/chat/models')
+    if (data.enabled) {
+      llmModels.value = data.models || []
+      selectedModel.value = data.current || ''
+    } else {
+      llmModels.value = []
+    }
+  } catch (e) { /* 忽略 */ }
+}
+
+async function changeModel() {
+  try {
+    await api.post('/chat/model', { model: selectedModel.value })
+    const m = llmModels.value.find((x) => x.id === selectedModel.value)
+    toast(`已切换为 ${m?.name || selectedModel.value}`)
+  } catch (e) {
+    toast(e.response?.data?.detail || '模型切换失败')
+    loadModels()
+  }
+}
 
 async function loadPoints() {
   try {
@@ -376,16 +413,22 @@ async function send() {
   messages.value.push({ id: tmpId, role: 'user', content, msg_type: 'text', emotion_type: null })
   scrollDown()
   try {
-    const { data } = await api.post(`/chat/sessions/${currentId.value}/messages`, { content })
-    messages.value = messages.value.filter((m) => m.id !== tmpId)
-    messages.value.push({ ...data.user_message })
-    messages.value.push({ ...data.reply, action: data.action || null, flow: data.flow || null })
-    lastEmotion.value = {
-      type: data.emotion.emotion_type,
-      polarity: data.emotion.polarity,
+    if (streaming.value) {
+      // ============ 流式模式（SSE）：逐字渲染，首字更快 ============
+      await sendStream(content, tmpId)
+    } else {
+      // ============ 非流式：一次性返回 ============
+      const { data } = await api.post(`/chat/sessions/${currentId.value}/messages`, { content, model: selectedModel.value || undefined })
+      messages.value = messages.value.filter((m) => m.id !== tmpId)
+      messages.value.push({ ...data.user_message })
+      messages.value.push({ ...data.reply, action: data.action || null, flow: data.flow || null })
+      lastEmotion.value = {
+        type: data.emotion.emotion_type,
+        polarity: data.emotion.polarity,
+      }
+      await loadSessions()
+      scrollDown()
     }
-    await loadSessions()
-    scrollDown()
   } catch (e) {
     messages.value = messages.value.filter((m) => m.id !== tmpId)
     draft.value = content
@@ -398,6 +441,79 @@ async function send() {
     typing.value = false
   }
   loadPoints()
+}
+
+/* ========== 流式发送（SSE fetch + ReadableStream 解析） ========== */
+const streaming = ref(
+  (() => { try { return localStorage.getItem('eh_streaming') !== '0' } catch (e) { return true } })()
+)
+
+function toggleStreaming() {
+  streaming.value = !streaming.value
+  try { localStorage.setItem('eh_streaming', streaming.value ? '1' : '0') } catch (e) { /* 忽略 */ }
+  toast(streaming.value ? '已切换为流式回复（逐字显示）' : '已切换为整段回复')
+}
+
+async function sendStream(content, tmpId) {
+  const streamReplyId = Date.now() + 1
+  let meta = null
+  let fullText = ''
+
+  // 用 fetch 手动处理 SSE（axios 不支持流式）
+  const token = localStorage.getItem('eh_token') || ''
+  const resp = await fetch(`/api/chat/sessions/${currentId.value}/messages/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ content, model: selectedModel.value || undefined }),
+  })
+  if (!resp.ok) { throw Object.assign(new Error('stream failed'), { response: { status: resp.status, data: await resp.json().catch(() => ({})) } }) }
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    // SSE 事件以 \n\n 分隔
+    const parts = buffer.split('\n\n')
+    buffer = parts.pop() || ''
+    for (const part of parts) {
+      const line = part.trim()
+      if (!line.startsWith('data: ')) continue
+      try {
+        const evt = JSON.parse(line.slice(6))
+
+        if (evt.type === 'meta') {
+          // 情绪/意图/meta 先行到达
+          meta = evt
+          messages.value = messages.value.filter((m) => m.id !== tmpId)
+          messages.value.push({ ...evt.user_message, emotion_type: evt.user_message.emotion_type })
+          // 占位回复气泡（逐步填充）
+          messages.value.push({ id: streamReplyId, role: 'assistant', content: '', streaming: true })
+          lastEmotion.value = { type: evt.emotion.emotion_type, polarity: evt.emotion.polarity }
+          scrollDown()
+        } else if (evt.type === 'chunk') {
+          // 逐字追加
+          fullText += evt.content
+          const m = messages.value.find((x) => x.id === streamReplyId)
+          if (m) {
+            m.content = fullText
+            m.streaming = true
+          }
+          scrollDown()
+        } else if (evt.type === 'done') {
+          // 完结：替换为正式回复
+          messages.value = messages.value.filter((m) => m.id !== streamReplyId)
+          messages.value.push({ ...evt.reply, action: meta?.action || null, flow: meta?.flow || null })
+          typing.value = false
+          await loadSessions()
+          scrollDown()
+        }
+      } catch (e) { /* 忽略解析错误 */ }
+    }
+  }
 }
 
 function pickImage() { fileInput.value?.click() }
@@ -475,6 +591,7 @@ async function loadDaily() {
 onMounted(async () => {
   loadDaily()
   loadPoints()
+  loadModels()
   try {
     const { data } = await api.get('/chat/personas')
     const m = {}
@@ -556,6 +673,15 @@ onBeforeUnmount(() => { recognition?.stop() })
   display: flex; align-items: center; justify-content: space-between;
 }
 .chat-title { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+
+.stream-toggle { border: 1px solid #e6dff5; background: #fdfcff; color: var(--text-soft); border-radius: 14px; padding: 4px 12px; font-size: 12px; cursor: pointer; transition: all .15s; }
+.model-select { border: 1px solid #e6dff5; background: #fdfcff; color: var(--text-soft); border-radius: 14px; padding: 4px 8px; font-size: 12px; outline: none; cursor: pointer; max-width: 132px; }
+.model-select:hover { border-color: var(--primary); color: var(--primary); }
+.stream-toggle.on { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+
+/* 流式回复光标 */
+.b-text .cursor-inline { display: inline-block; width: 2px; height: 1em; background: var(--primary); margin-left: 2px; vertical-align: text-bottom; animation: blink .8s infinite; }
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 .title-edit {
   font-size: 15px; font-weight: 600; color: var(--text);
   border: 1px solid var(--primary); border-radius: 8px;

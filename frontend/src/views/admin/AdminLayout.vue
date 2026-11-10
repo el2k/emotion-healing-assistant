@@ -96,7 +96,11 @@ const nav = [
   },
   {
     label: '系统',
-    items: [{ name: '系统信息', path: '/admin/system', icon: 'sliders' }],
+    items: [
+      { name: '可观测性', path: '/admin/observability', icon: 'spark' },
+      { name: '模型管理', path: '/admin/models', icon: 'sliders' },
+      { name: '系统信息', path: '/admin/system', icon: 'sliders' },
+    ],
   },
 ]
 

@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 os.environ["DB_PATH"] = os.path.join(
     tempfile.gettempdir(), f"test_forum_{int(time.time() * 1000)}.db")
+# 测试隔离：禁用真实 LLM 调用（不消耗额度）
+os.environ["LLM_ENABLED"] = "false"
 
 from app.main import app  # noqa: E402
 

@@ -45,14 +45,15 @@ def _parse(text: str) -> dict | None:
     return data
 
 
-async def analyze(user_message: str) -> dict | None:
-    """调用大模型深度分析；失败/未配置返回 None。"""
+async def analyze(user_message: str, model: str | None = None) -> dict | None:
+    """调用大模型深度分析；失败/未配置返回 None。model 为空用全局默认。"""
     if not _is_configured():
         return None
+    used_model = model or settings.LLM_MODEL
     url = f"{settings.LLM_BASE_URL.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"}
     payload = {
-        "model": settings.LLM_MODEL,
+        "model": used_model,
         "messages": [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
@@ -61,10 +62,10 @@ async def analyze(user_message: str) -> dict | None:
     }
     try:
         async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT) as client:
-            resp = await client.post(settings.LLM_BASE_URL.rstrip("/") + "/chat/completions",
-                                     headers=headers, json=payload)
+            resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
+            body = resp.json()
+            content = body["choices"][0]["message"]["content"]
         data = _parse(content)
         if not data:
             return None
@@ -82,6 +83,9 @@ async def analyze(user_message: str) -> dict | None:
             "high_risk": [data.get("high_risk", "")] if data.get("high_risk") else [],
             "suggestion": data.get("suggestion", ""),
             "source": "llm",
+            # 供上层记录 token 用量（管理后台按模型统计「花费」）
+            "model": used_model,
+            "usage": body.get("usage") or {},
         }
     except Exception:
         return None

@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 # 使用临时数据库，避免污染正式库（必须在导入 app.main 之前设置）
 os.environ["DB_PATH"] = os.path.join(
     tempfile.gettempdir(), f"test_healing_{int(time.time() * 1000)}.db")
+# 测试隔离：禁用真实 LLM 调用（不消耗额度；LLM 链路用打桩单独测）
+os.environ["LLM_ENABLED"] = "false"
 
 from app.main import app  # noqa: E402
 

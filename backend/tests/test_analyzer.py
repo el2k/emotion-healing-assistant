@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """情绪引擎单元测试：python -m tests.test_analyzer"""
 import asyncio
+import os
+
+# 测试隔离：禁用真实 LLM 调用（「双引擎降级」断言依赖未配置状态）
+os.environ["LLM_ENABLED"] = "false"
 
 from app.emotion import analyzer
 from app.emotion.rule_engine import analyze

@@ -32,6 +32,7 @@ class User(Base):
     role = Column(String(16), default="user")          # user / admin
     is_active = Column(Boolean, default=True)
     points = Column(Integer, default=999999)            # 积分（聊天消耗，每日可领）
+    llm_model = Column(String(64), default="")          # 用户偏好的模型（空=用默认）
     created_at = Column(DateTime, default=_utcnow)
 
     sessions = relationship("ChatSession", back_populates="user",
@@ -152,6 +153,45 @@ class PointsLedger(Base):
     created_at = Column(DateTime, default=_utcnow, index=True)
 
 
+class UserWikiEntry(Base):
+    """用户记忆维基（LLM Wiki 范式）：从对话中持续抽取、可与用户共建的事实条目。
+
+    与统计画像（profile_service 动态计算）互补：
+      统计画像回答「情绪模式如何」；
+      记忆维基回答「用户是谁、具体在意哪些人与事」——这些只能靠积累，无法实时统计。
+    """
+    __tablename__ = "user_wiki_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    category = Column(String(32), index=True)            # 基本情况/学业职业/重要他人/喜好偏好/目标计划/健康情况/情绪背景
+    key = Column(String(120), default="")                # 简短标签，如「养的宠物」「备考方向」
+    value = Column(Text, default="")                     # 事实描述（一句自然语言）
+    evidence = Column(String(200), default="")           # 抽取依据（原话片段，便于用户核实）
+    source = Column(String(16), default="rule")          # rule / llm / user
+    confidence = Column(Float, default=0.6)              # 0~1
+    pinned = Column(Boolean, default=False)              # 用户置顶/确认的事实
+    hits = Column(Integer, default=1)                    # 同类事实被提及次数（用于置信度成长）
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class PaymentOrder(Base):
+    """积分充值订单。支持微信/支付宝（Demo 模式模拟确认，生产模式对接真实网关）。"""
+    __tablename__ = "payment_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    amount_cents = Column(Integer, nullable=False)       # 支付金额（分）
+    points = Column(Integer, nullable=False)             # 到账积分
+    method = Column(String(16), default="wechat")         # wechat / alipay
+    plan_id = Column(String(16), default="")             # 套餐 ID
+    status = Column(String(16), default="pending", index=True)  # pending / paid / cancelled
+    trade_no = Column(String(64), default="")            # 第三方支付流水号
+    created_at = Column(DateTime, default=_utcnow)
+    paid_at = Column(DateTime)
+
+
 class KnowledgeArticle(Base):
     """情绪知识库文章。"""
     __tablename__ = "knowledge_articles"
@@ -165,4 +205,39 @@ class KnowledgeArticle(Base):
     source = Column(String(200), default="")            # 参考来源
     read_minutes = Column(Integer, default=3)
     views = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_utcnow, index=True)
+
+
+class LLMModel(Base):
+    """可用的 LLM 模型配置（管理后台维护，用户端可选）。
+
+    free_quota_tokens 为人工填入的免费额度（阿里百炼控制台可查），
+    剩余额度 = free_quota_tokens - 该模型累计 total_tokens。
+    """
+    __tablename__ = "llm_models"
+
+    id = Column(Integer, primary_key=True, index=True)
+    model_id = Column(String(64), unique=True, index=True, nullable=False)  # 如 qwen-plus
+    display_name = Column(String(64), default="")       # 展示名，如 通义千问 Plus
+    description = Column(String(200), default="")       # 一句话说明（用户可见）
+    enabled = Column(Boolean, default=True)             # 是否对用户开放
+    is_default = Column(Boolean, default=False)         # 默认模型（全局唯一）
+    free_quota_tokens = Column(Integer, default=0)      # 免费额度（token，0=未配置）
+    sort_order = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class LLMUsageLog(Base):
+    """每次 LLM 调用的 token 用量记录（按模型/场景/用户统计）。"""
+    __tablename__ = "llm_usage_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    model = Column(String(64), index=True, nullable=False)   # 实际调用的模型
+    scene = Column(String(24), default="reply")             # analyze / reply / reply_stream
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    total_tokens = Column(Integer, default=0)               # 消耗的 token（花费）
+    success = Column(Boolean, default=True)
     created_at = Column(DateTime, default=_utcnow, index=True)

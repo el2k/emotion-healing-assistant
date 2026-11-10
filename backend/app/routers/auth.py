@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""认证路由：注册、登录、个人信息、退出。"""
-from fastapi import APIRouter, Depends, HTTPException
+"""认证路由：注册、登录、个人信息、退出（含限流防护）。"""
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -9,12 +9,25 @@ from ..deps import get_current_user
 from ..models import ChatSession, EmotionRecord, Message, User
 from ..schemas import LoginIn, ProfileUpdateIn, RegisterIn, TokenOut
 from ..security import create_token, hash_password, verify_password
+from ..security.rate_limit import login_limiter, register_limiter
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+def _client_ip(request: Request) -> str:
+    """取真实客户端 IP（支持代理头）。"""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 @router.post("/register", response_model=TokenOut)
-def register(data: RegisterIn, db: Session = Depends(get_db)):
+def register(data: RegisterIn, request: Request, db: Session = Depends(get_db)):
+    # 限流：单 IP 60秒/5次，超限封禁 10 分钟（防批量注册）
+    ip = _client_ip(request)
+    if not register_limiter.check(f"reg:{ip}"):
+        raise HTTPException(status_code=429, detail="注册请求过于频繁，请稍后再试")
     if db.query(User).filter(User.phone == data.phone).first():
         raise HTTPException(status_code=409, detail="该手机号已注册")
     user = User(
@@ -28,16 +41,27 @@ def register(data: RegisterIn, db: Session = Depends(get_db)):
     db.refresh(user)
     token = create_token(user.id, user.role)
     return TokenOut(token=token, user_id=user.id,
-                     nickname=user.nickname, role=user.role)
+                    nickname=user.nickname, role=user.role)
 
 
 @router.post("/login", response_model=TokenOut)
-def login(data: LoginIn, db: Session = Depends(get_db)):
+def login(data: LoginIn, request: Request, db: Session = Depends(get_db)):
+    # 双维度限流：IP（防扫描）+ 账号（防定向爆破）
+    # 60秒内每 IP 最多10次、每账号最多10次；超限封禁5分钟
+    ip = _client_ip(request)
+    if not login_limiter.check(f"ip:{ip}"):
+        raise HTTPException(status_code=429, detail="尝试过于频繁，请5分钟后重试")
+    if not login_limiter.check(f"acct:{data.phone}"):
+        raise HTTPException(status_code=429, detail="该账号尝试过于频繁，请5分钟后重试")
+
     user = db.query(User).filter(User.phone == data.phone).first()
     if not user or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="手机号或密码错误")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="账号已被禁用")
+    # 登录成功：重置该账号与 IP 的计数（不误伤正常用户）
+    login_limiter.reset(f"acct:{data.phone}")
+    login_limiter.reset(f"ip:{ip}")
     token = create_token(user.id, user.role)
     return TokenOut(token=token, user_id=user.id,
                     nickname=user.nickname, role=user.role)

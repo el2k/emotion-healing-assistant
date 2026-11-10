@@ -8,7 +8,7 @@ from ..emotion import analyzer
 from ..emotion import intent as intent_mod
 from ..models import ChatSession, EmotionRecord, Message
 from .. import personas
-from . import dialog_flow, emotion_service, llm_reply
+from . import dialog_flow, emotion_service, llm_reply, llm_usage, profile_service, wiki_service
 
 
 def create_session(db: Session, user_id: int, title: str = "新的对话",
@@ -68,10 +68,20 @@ def delete_session(db: Session, session_id: int) -> bool:
 
 async def send_user_message(db: Session, user_id: int, session_id: int,
                             content: str, msg_type: str = "text",
-                            image_url: str = "") -> dict:
-    """处理用户消息：情绪分析 -> 意图识别 -> 生成回复(带记忆) -> 入库 -> 写情绪档案。"""
-    # 1) 情绪分析
-    emotion = await analyzer.analyze(content)
+                            image_url: str = "", model: str | None = None) -> dict:
+    """处理用户消息：情绪分析 -> 意图识别 -> 生成回复(带记忆) -> 入库 -> 写情绪档案。
+
+    model：本次使用的 LLM 模型（已由路由层解析好）；None 时用全局默认。
+    """
+    # 1) 情绪分析（model 使分析/回复使用同一模型，token 统计归属清晰）
+    emotion = await analyzer.analyze(content, model=model)
+    # 1.1) 记录情绪分析的 token 消耗（LLM 来源时）
+    if emotion.get("source") == "llm" and emotion.get("llm_model"):
+        try:
+            llm_usage.record(db, user_id, emotion["llm_model"], "analyze",
+                             emotion.get("llm_usage"), success=True, estimate_text=content)
+        except Exception:
+            db.rollback()
     # 1.1) 个人情绪校准（用用户历史纠正结果做个性化修正，不完全依赖模型）
     emotion, calibration = emotion_service.apply_personal_calibration(
         db, user_id, content, emotion)
@@ -80,8 +90,12 @@ async def send_user_message(db: Session, user_id: int, session_id: int,
     # 2) 意图识别
     intent = intent_mod.detect(content, high_risk)
 
-    # 3) 多轮记忆上下文 + 长期画像
-    history, profile_text = emotion_service.build_memory_context(db, user_id, session_id)
+    # 3) 多轮记忆上下文 + 长期画像（画像卡 + 记忆维基：让角色「记得你」）
+    history, _ = emotion_service.build_memory_context(db, user_id, session_id)
+    profile_text = profile_service.build_prompt_card(db, user_id)
+    wiki_text = wiki_service.build_wiki_prompt(db, user_id)
+    if wiki_text:
+        profile_text = (profile_text + "\n" + wiki_text) if profile_text else wiki_text
 
     # 3.1) 会话级情绪轨迹与陪伴策略（连续低落 → 升级深度陪伴 + 去重）
     trajectory = dialog_flow.compute_trajectory(db, session_id,
@@ -99,15 +113,24 @@ async def send_user_message(db: Session, user_id: int, session_id: int,
     persona_id = session.persona_id if session else "nuan"
 
     # 4) 生成回复
+    reply_usage: dict = {}
     if msg_type == "image" and not content.strip():
         reply = "我看到你分享的图片啦，谢谢你愿意和我分享这一刻～如果它让你想到什么、或有什么感受，都可以说给我听。"
         reply_source = "template"
     else:
-        reply, reply_source = await llm_reply.generate(
+        reply, reply_source, reply_usage = await llm_reply.generate(
             emotion, content, history=history, profile_text=profile_text,
             intent=intent, persona_id=persona_id,
             recent_replies=trajectory["recent_replies"],
-            strategy_text=strategy_text, length_text=length_text)
+            strategy_text=strategy_text, length_text=length_text,
+            model=model)
+        # 记录回复生成的 token 消耗
+        if reply_usage.get("model"):
+            try:
+                llm_usage.record(db, user_id, reply_usage["model"], "reply",
+                                 reply_usage.get("usage"), success=True, estimate_text=reply)
+            except Exception:
+                db.rollback()
 
     trigger = (content[:60] + "…") if len(content) > 60 else content
 
@@ -149,6 +172,15 @@ async def send_user_message(db: Session, user_id: int, session_id: int,
     db.refresh(user_msg)
     db.refresh(assistant_msg)
 
+    # 9) 记忆维基编译（每 EXTRACT_EVERY 条用户消息触发一次，后台执行，不阻塞回复）
+    try:
+        total = db.query(Message).join(ChatSession, ChatSession.id == Message.session_id) \
+            .filter(ChatSession.user_id == user_id, Message.role == "user").count()
+        from ..database import SessionLocal
+        wiki_service.maybe_compile_async(SessionLocal, user_id, total)
+    except Exception:
+        pass
+
     return {
         "user_message": {
             "id": user_msg.id, "role": "user", "content": content,
@@ -172,6 +204,7 @@ async def send_user_message(db: Session, user_id: int, session_id: int,
             "calibration": emotion.get("calibration"),
         },
         "reply_source": reply_source,
+        "degraded": reply_source == "template_degraded",  # True = LLM 故障走了降级
         "flow": {
             "level": trajectory["level"],
             "label": trajectory["label"],

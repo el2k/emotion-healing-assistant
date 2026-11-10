@@ -7,7 +7,7 @@ import json
 import os
 import time
 
-from .config import settings
+from ..config import settings
 
 _SALT_BYTES = 16
 _ITERATIONS = 120_000

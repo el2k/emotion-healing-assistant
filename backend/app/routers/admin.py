@@ -14,16 +14,117 @@ from ..config import BASE_DIR, settings
 from ..database import get_db
 from ..deps import get_current_user, require_admin
 from ..models import (ChatSession, EmotionCalibration, EmotionRecord,
-                      ForumComment, ForumLike, ForumPost, Message, User)
+                      ForumComment, ForumLike, ForumPost, LLMModel, LLMUsageLog,
+                      Message, User)
 from .. import personas
 from ..schemas import UserUpdateIn
 from ..security import hash_password
 from ..services import emotion_service
+from ..observability import metrics, llm_breaker
+from ..observability.drift import drift_report
 
 APP_VERSION = "2.0.0"
 
 router = APIRouter(prefix="/api/admin", tags=["admin"],
                    dependencies=[Depends(require_admin)])
+
+
+# ============================================================
+# 可观测性端点：指标、漂移检测、断路器
+# ============================================================
+@router.get("/observability/overview")
+def observability_overview(db: Session = Depends(get_db)):
+    """可观测性总览：请求指标 + LLM 指标 + 断路器 + 数据漂移 + 系统摘要。"""
+    req_5m = metrics.request_summary(minutes=5)
+    req_1h = metrics.request_summary(minutes=60)
+    req_24h = metrics.request_summary(minutes=1440)
+    llm_1h = metrics.llm_summary(minutes=60)
+    lifetime = metrics.lifetime_summary()
+    breaker = llm_breaker.status()
+
+    # 深度健康（内联，避免循环导入）
+    health_checks = {}
+    try:
+        from sqlalchemy import text as _text
+        db.execute(_text("SELECT 1"))
+        health_checks["database"] = {"status": "ok"}
+    except Exception as e:
+        health_checks["database"] = {"status": "fail", "message": str(e)[:80]}
+    try:
+        import shutil as _shutil
+        _total, _used, _free = _shutil.disk_usage(Path(__file__).parent)
+        _free_pct = _free / _total * 100
+        health_checks["disk"] = {
+            "status": "ok" if _free_pct > 10 else "warn",
+            "message": f"剩余 {_free_pct:.0f}%",
+        }
+    except Exception:
+        health_checks["disk"] = {"status": "unknown"}
+    breaker_state = breaker.get("state", "closed")
+    health_checks["llm_circuit"] = {
+        "status": ("ok" if breaker_state == "closed" else
+                    "degraded" if breaker_state == "half_open" else "fail"),
+    }
+    health = {"status": "ok" if all(c["status"] == "ok" for c in health_checks.values()) else "degraded",
+              "checks": health_checks}
+
+    # 漂移检测（可能耗时，放在最后）
+    drift = drift_report(db)
+
+    return {
+        "request_metrics": {
+            "last_5m": req_5m,
+            "last_1h": req_1h,
+            "last_24h": req_24h,
+        },
+        "llm_metrics": llm_1h,
+        "llm_breaker": breaker,
+        "drift": drift,
+        "health": health,
+        "lifetime": lifetime,
+        "app_version": APP_VERSION,
+    }
+
+
+@router.get("/observability/metrics")
+def observability_metrics(minutes: int = Query(60, ge=1, le=1440)):
+    """按时间窗口查询请求指标。"""
+    return {
+        "window_minutes": minutes,
+        "requests": metrics.request_summary(minutes),
+        "llm": metrics.llm_summary(minutes),
+        "lifetime": metrics.lifetime_summary(),
+    }
+
+
+@router.get("/observability/drift")
+def observability_drift(db: Session = Depends(get_db)):
+    """数据漂移检测报告。"""
+    return drift_report(db)
+
+
+@router.get("/observability/breaker")
+def observability_breaker():
+    """LLM 断路器状态。"""
+    return llm_breaker.status()
+
+
+@router.get("/observability/ratelimits")
+def observability_ratelimits():
+    """限流器状态（登录/注册/API 全局限流）。"""
+    from ..security.rate_limit import login_limiter, register_limiter, api_limiter
+    return {
+        "login": login_limiter.status(),
+        "register": register_limiter.status(),
+        "api": api_limiter.status(),
+    }
+
+
+@router.post("/observability/breaker/reset")
+def observability_breaker_reset():
+    """手动重置 LLM 断路器（故障排除后恢复）。"""
+    llm_breaker.reset()
+    return {"ok": True, "message": "断路器已重置为 CLOSED"}
 
 
 def _media_of(post: ForumPost) -> str:
@@ -735,3 +836,186 @@ def system_info(db: Session = Depends(get_db)):
             "personas": len(personas.list_personas()),
         },
     }
+
+
+# ============================================================
+# LLM 模型管理与 token 用量统计
+# ============================================================
+class LLMModelIn(BaseModel):
+    model_id: str
+    display_name: str = ""
+    description: str = ""
+    free_quota_tokens: int = 0
+    enabled: bool = True
+    is_default: bool = False
+    sort_order: int = 0
+
+
+class LLMModelUpdateIn(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    free_quota_tokens: int | None = None
+    enabled: bool | None = None
+    is_default: bool | None = None
+    sort_order: int | None = None
+
+
+def _today_start_utc():
+    """UTC 今日零点（与 created_at 的 utcnow 对齐）。"""
+    return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _model_stats(db: Session, model_id: str) -> dict:
+    used_total = (db.query(func.coalesce(func.sum(LLMUsageLog.total_tokens), 0))
+                  .filter(LLMUsageLog.model == model_id).scalar() or 0)
+    today = _today_start_utc()
+    used_today = (db.query(func.coalesce(func.sum(LLMUsageLog.total_tokens), 0))
+                  .filter(LLMUsageLog.model == model_id,
+                          LLMUsageLog.created_at >= today).scalar() or 0)
+    calls_today = (db.query(func.count(LLMUsageLog.id))
+                   .filter(LLMUsageLog.model == model_id,
+                           LLMUsageLog.created_at >= today).scalar() or 0)
+    calls_total = (db.query(func.count(LLMUsageLog.id))
+                   .filter(LLMUsageLog.model == model_id).scalar() or 0)
+    last_used = (db.query(func.max(LLMUsageLog.created_at))
+                 .filter(LLMUsageLog.model == model_id).scalar())
+    return {
+        "used_total": int(used_total),
+        "used_today": int(used_today),
+        "calls_today": int(calls_today),
+        "calls_total": int(calls_total),
+        "last_used_at": (last_used.replace(tzinfo=timezone.utc).isoformat()
+                         if last_used else None),
+    }
+
+
+@router.get("/llm/models")
+def llm_models_overview(db: Session = Depends(get_db)):
+    """模型配置列表 + 每模型 token 额度/已用/剩余/今日消耗 + 全局汇总。"""
+    rows = db.query(LLMModel).order_by(LLMModel.sort_order, LLMModel.id).all()
+    out = []
+    for m in rows:
+        st = _model_stats(db, m.model_id)
+        quota = int(m.free_quota_tokens or 0)
+        out.append({
+            "id": m.id, "model_id": m.model_id,
+            "display_name": m.display_name or m.model_id,
+            "description": m.description or "",
+            "enabled": bool(m.enabled), "is_default": bool(m.is_default),
+            "free_quota_tokens": quota,
+            "remaining": max(0, quota - st["used_total"]) if quota > 0 else None,
+            "sort_order": m.sort_order or 0,
+            **st,
+        })
+    today = _today_start_utc()
+    total_tokens_today = (db.query(func.coalesce(func.sum(LLMUsageLog.total_tokens), 0))
+                         .filter(LLMUsageLog.created_at >= today).scalar() or 0)
+    calls_today = (db.query(func.count(LLMUsageLog.id))
+                   .filter(LLMUsageLog.created_at >= today).scalar() or 0)
+    total_tokens = (db.query(func.coalesce(func.sum(LLMUsageLog.total_tokens), 0))
+                    .scalar() or 0)
+    return {
+        "models": out,
+        "summary": {
+            "enabled_models": sum(1 for m in out if m["enabled"]),
+            "total_models": len(out),
+            "tokens_today": int(total_tokens_today),
+            "calls_today": int(calls_today),
+            "tokens_total": int(total_tokens),
+        },
+    }
+
+
+@router.post("/llm/models")
+def create_llm_model(data: LLMModelIn, db: Session = Depends(get_db)):
+    """新增可选模型。"""
+    mid = data.model_id.strip()
+    if not mid:
+        raise HTTPException(400, "模型 ID 不能为空")
+    if db.query(LLMModel).filter(LLMModel.model_id == mid).first():
+        raise HTTPException(400, "该模型已存在")
+    m = LLMModel(model_id=mid, display_name=data.display_name or mid,
+                 description=data.description,
+                 free_quota_tokens=max(0, data.free_quota_tokens),
+                 enabled=data.enabled, is_default=False,
+                 sort_order=data.sort_order)
+    db.add(m)
+    db.flush()
+    if data.is_default:
+        _set_default(db, m)
+    db.commit()
+    db.refresh(m)
+    return {"id": m.id, "model_id": m.model_id}
+
+
+def _set_default(db: Session, target: LLMModel) -> None:
+    db.query(LLMModel).update({LLMModel.is_default: False})
+    target.is_default = True
+    target.enabled = True
+
+
+@router.put("/llm/models/{model_pk}")
+def update_llm_model(model_pk: int, data: LLMModelUpdateIn,
+                     db: Session = Depends(get_db)):
+    m = db.query(LLMModel).filter(LLMModel.id == model_pk).first()
+    if not m:
+        raise HTTPException(404, "模型不存在")
+    if data.display_name is not None:
+        m.display_name = data.display_name
+    if data.description is not None:
+        m.description = data.description
+    if data.free_quota_tokens is not None:
+        m.free_quota_tokens = max(0, data.free_quota_tokens)
+    if data.sort_order is not None:
+        m.sort_order = data.sort_order
+    if data.enabled is not None:
+        if not data.enabled and m.is_default:
+            raise HTTPException(400, "默认模型不能停用，请先切换默认模型")
+        m.enabled = data.enabled
+    if data.is_default:
+        _set_default(db, m)
+    db.commit()
+    return {"ok": True}
+
+
+@router.delete("/llm/models/{model_pk}")
+def delete_llm_model(model_pk: int, db: Session = Depends(get_db)):
+    m = db.query(LLMModel).filter(LLMModel.id == model_pk).first()
+    if not m:
+        raise HTTPException(404, "模型不存在")
+    if m.is_default:
+        raise HTTPException(400, "默认模型不能删除，请先切换默认模型")
+    db.delete(m)
+    db.commit()
+    return {"ok": True}
+
+
+@router.get("/llm/usage")
+def llm_usage_stats(days: int = Query(7, ge=1, le=90),
+                    db: Session = Depends(get_db)):
+    """token 用量：按天趋势 + 按模型汇总 + 最近记录。"""
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    day_rows = (db.query(func.date(LLMUsageLog.created_at).label("d"),
+                         func.coalesce(func.sum(LLMUsageLog.total_tokens), 0),
+                         func.count(LLMUsageLog.id))
+                .filter(LLMUsageLog.created_at >= since)
+                .group_by("d").order_by("d").all())
+    by_day = [{"date": str(r[0]), "tokens": int(r[1]), "calls": int(r[2])}
+              for r in day_rows]
+    model_rows = (db.query(LLMUsageLog.model,
+                           func.coalesce(func.sum(LLMUsageLog.total_tokens), 0),
+                           func.count(LLMUsageLog.id))
+                  .filter(LLMUsageLog.created_at >= since)
+                  .group_by(LLMUsageLog.model)
+                  .order_by(func.sum(LLMUsageLog.total_tokens).desc()).all())
+    by_model = [{"model": r[0], "tokens": int(r[1]), "calls": int(r[2])}
+                for r in model_rows]
+    recent_rows = (db.query(LLMUsageLog)
+                   .order_by(LLMUsageLog.id.desc()).limit(50).all())
+    recent = [{
+        "id": r.id, "user_id": r.user_id, "model": r.model, "scene": r.scene,
+        "total_tokens": r.total_tokens, "success": bool(r.success),
+        "created_at": (r.created_at.replace(tzinfo=timezone.utc).isoformat()
+                       if r.created_at else None),
+    } for r in recent_rows]
+    return {"days": days, "by_day": by_day, "by_model": by_model, "recent": recent}

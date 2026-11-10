@@ -26,7 +26,8 @@ def _clamp(v, default):
         return default
 
 
-async def analyze(text: str, use_llm: bool = True) -> dict:
+async def analyze(text: str, use_llm: bool = True,
+                  model: str | None = None) -> dict:
     """先跑本地规则，再尝试 LLM 增强（未配置则返回规则结果）。
 
     设计：LLM 结果作为"增强层"，经合法性校验后合并；解析失败自动回落规则结果，保证永不失败。
@@ -36,7 +37,7 @@ async def analyze(text: str, use_llm: bool = True) -> dict:
     if not use_llm:
         return rule_result
 
-    llm_result = await llm.analyze(text)
+    llm_result = await llm.analyze(text, model=model)
     if llm_result is None:
         return rule_result
 
@@ -65,4 +66,7 @@ async def analyze(text: str, use_llm: bool = True) -> dict:
     merged["high_risk"] = rule_result["high_risk"] or llm_result.get("high_risk", [])
     merged["suggestion"] = llm_result.get("suggestion", "")
     merged["source"] = "llm"
+    # 透传模型与用量信息（chat 服务层记录到 llm_usage_logs）
+    merged["llm_model"] = llm_result.get("model", "")
+    merged["llm_usage"] = llm_result.get("usage") or {}
     return merged

@@ -14,6 +14,70 @@
     </header>
 
     <div class="container" v-if="loaded">
+      <!-- 用户画像（长期记忆，同时注入角色） -->
+      <div v-if="portrait" class="card block portrait-card">
+        <div class="pt-head">
+          <h3>🪞 我的画像 <span class="pt-stage">{{ portrait.basic.stage }}</span></h3>
+          <span class="pt-days">陪伴第 {{ portrait.basic.joined_days }} 天 · 活跃 {{ portrait.basic.active_days }} 天</span>
+        </div>
+        <p class="pt-summary">{{ portrait.summary }}</p>
+        <div class="pt-tags">
+          <span>主导情绪 · {{ portrait.emotion.dominant }}</span>
+          <span v-if="portrait.emotion.peak_slot">常在{{ portrait.emotion.peak_slot }}倾诉</span>
+          <span :class="{ warn: portrait.emotion.volatile }">
+            {{ portrait.emotion.volatile ? '情绪波动较大' : '情绪较稳定' }}
+          </span>
+          <span v-if="portrait.emotion.trend">{{ portrait.emotion.trend }}</span>
+          <span v-if="portrait.emotion.risk_count" class="warn">高风险记录 {{ portrait.emotion.risk_count }} 次</span>
+        </div>
+        <div v-if="portrait.topics.length" class="pt-topics">
+          <span class="pt-label">近期话题</span>
+          <span v-for="t in portrait.topics" :key="t.name" class="pt-topic">#{{ t.name }} <i>{{ t.count }}</i></span>
+        </div>
+        <div v-if="portrait.facts.length" class="pt-facts">
+          <div v-for="(f, i) in portrait.facts" :key="i">· {{ f }}</div>
+        </div>
+        <p class="pt-note">画像会随聊天自动更新，并作为长期记忆提供给角色——聊得越久，角色越懂你。</p>
+      </div>
+
+      <!-- 记忆维基（LLM Wiki：从对话中持续沉淀的长期事实，用户可核实可纠错） -->
+      <div class="card block wiki-card">
+        <div class="pt-head">
+          <h3>🧠 记忆维基
+            <span class="wiki-badge">{{ wiki.stats.by_source.llm > 0 ? 'LLM 编译' : '规则编译' }}</span>
+          </h3>
+          <button class="wiki-add-btn" @click="showWikiForm = !showWikiForm">＋ 补充</button>
+        </div>
+        <p class="wiki-desc">与你有关的重要事实会从聊天中沉淀到这里，并作为长期记忆注入角色。发现有误可直接删除。</p>
+
+        <div v-if="showWikiForm" class="wiki-form">
+          <select v-model="wikiForm.category" class="wiki-input">
+            <option v-for="c in wikiCategories" :key="c" :value="c">{{ c }}</option>
+          </select>
+          <input v-model="wikiForm.key" class="wiki-input" placeholder="标签，如：养的宠物" maxlength="12" />
+          <input v-model="wikiForm.value" class="wiki-input" placeholder="内容，如：一只叫团团的橘猫" maxlength="40" />
+          <button class="wiki-save" :disabled="savingWiki || !wikiForm.key.trim() || !wikiForm.value.trim()" @click="saveWikiEntry">
+            {{ savingWiki ? '保存中…' : '保存' }}
+          </button>
+        </div>
+
+        <div v-if="wiki.entries.length" class="wiki-list">
+          <div v-for="e in wiki.entries" :key="e.id" class="wiki-item">
+            <div class="wi-main">
+              <span class="wi-cat">{{ e.category }}</span>
+              <b>{{ e.key }}</b>
+              <span class="wi-value">{{ e.value }}</span>
+            </div>
+            <div class="wi-foot">
+              <span class="wi-ev" :title="e.evidence">依据：{{ e.evidence || '—' }}</span>
+              <span class="wi-src">{{ wikiSourceLabel(e.source) }} · 置信 {{ e.confidence }}</span>
+              <button class="wi-del" title="删除这条记忆" @click="removeWikiEntry(e)">✕</button>
+            </div>
+          </div>
+        </div>
+        <div v-else class="wiki-empty">还没有沉淀的记忆——多聊聊你的生活，重要的事会自动记在这里。</div>
+      </div>
+
       <!-- 今日小结 -->
       <div class="card daily">
         <div class="daily-l">
@@ -177,6 +241,43 @@ const ranges = [
 ]
 const days = ref(90)
 const profile = ref(null)
+const portrait = ref(null)
+
+const wiki = ref({ entries: [], markdown: '', stats: { total: 0, by_source: { llm: 0, rule: 0, user: 0 } } })
+const showWikiForm = ref(false)
+const savingWiki = ref(false)
+const wikiCategories = ['基本情况', '学业职业', '重要他人', '喜好偏好', '目标计划', '健康情况']
+const wikiForm = ref({ category: '基本情况', key: '', value: '' })
+
+const wikiSourceLabel = (s) => ({ llm: 'AI 抽取', rule: '对话沉淀', user: '我补充的' }[s] || s)
+
+async function loadWiki() {
+  try {
+    const { data } = await api.get('/profile/me/wiki')
+    wiki.value = data
+  } catch (e) { /* 忽略 */ }
+}
+
+async function saveWikiEntry() {
+  savingWiki.value = true
+  try {
+    await api.post('/profile/me/wiki', wikiForm.value)
+    wikiForm.value.key = ''
+    wikiForm.value.value = ''
+    showWikiForm.value = false
+    await loadWiki()
+  } catch (e) { /* 忽略 */ } finally {
+    savingWiki.value = false
+  }
+}
+
+async function removeWikiEntry(e) {
+  if (!confirm(`删除记忆「${e.key}」吗？`)) return
+  try {
+    await api.delete(`/profile/me/wiki/${e.id}`)
+    await loadWiki()
+  } catch (err) { /* 忽略 */ }
+}
 const daily = ref({ mood: 0.5, push_text: '', tip: '' })
 const calibration = ref({ total: 0, pairs: [], recent: [], note: '', effective: false })
 const personaStats = ref({ total_sessions: 0, items: [] })
@@ -309,6 +410,13 @@ async function loadProfile() {
   await nextTick()
   pieChart?.dispose(); lineChart?.dispose(); barChart?.dispose()
   renderCharts()
+  // 画像（长期画像卡，与角色共享）
+  try {
+    const { data } = await api.get('/profile/me/portrait?days=90')
+    portrait.value = data
+  } catch (e) { /* 忽略 */ }
+  // 记忆维基
+  loadWiki()
 }
 
 async function setRange(v) {
@@ -369,6 +477,49 @@ onBeforeUnmount(() => {
 
 .block { padding: 18px 20px; margin-top: 16px; }
 .block h3 { font-size: 15px; margin-bottom: 14px; }
+
+/* 用户画像卡 */
+.portrait-card { background: linear-gradient(135deg, #ffffff 0%, #fbf8ff 60%, #fdf4f7 100%); }
+.pt-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.pt-head h3 { margin: 0; display: flex; align-items: center; gap: 8px; }
+.pt-stage { font-size: 11.5px; font-weight: 600; color: #fff; background: linear-gradient(135deg, var(--primary), var(--accent)); padding: 2px 10px; border-radius: 12px; }
+.pt-days { font-size: 12px; color: var(--text-soft); }
+.pt-summary { font-size: 13.5px; line-height: 1.8; color: #4a4360; }
+.pt-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.pt-tags span { font-size: 12px; color: #6f63b8; background: #f2eefc; padding: 3px 10px; border-radius: 14px; }
+.pt-tags span.warn { color: #b05a6a; background: #fdeef0; }
+.pt-topics { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.pt-label { font-size: 12px; color: var(--text-soft); }
+.pt-topic { font-size: 12px; color: #5f8a74; background: #eaf7f0; padding: 3px 10px; border-radius: 14px; }
+.pt-topic i { font-style: normal; opacity: .65; font-size: 11px; margin-left: 2px; }
+.pt-facts { margin-top: 12px; padding: 10px 14px; background: rgba(255,255,255,.7); border: 1px dashed #e6dff5; border-radius: 10px; }
+.pt-facts div { font-size: 12.5px; color: #6f6885; line-height: 1.9; }
+.pt-note { font-size: 11.5px; color: var(--text-soft); margin-top: 10px; }
+
+/* 记忆维基卡片 */
+.wiki-card { padding: 18px 20px; margin-top: 16px; }
+.wiki-card .pt-head { margin-bottom: 8px; }
+.wiki-badge { font-size: 10.5px; font-weight: 600; color: #5f8a74; background: #eaf7f0; padding: 2px 8px; border-radius: 10px; }
+.wiki-add-btn { border: 1px solid var(--primary); background: var(--primary-soft); color: var(--primary); border-radius: 8px; padding: 5px 12px; font-size: 12.5px; cursor: pointer; }
+.wiki-desc { font-size: 12.5px; color: var(--text-soft); line-height: 1.7; margin-bottom: 12px; }
+.wiki-form { display: grid; grid-template-columns: 110px 150px 1fr auto; gap: 8px; margin-bottom: 14px; }
+@media (max-width: 700px) { .wiki-form { grid-template-columns: 1fr 1fr; } }
+.wiki-input { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; background: #fbfaff; outline: none; }
+.wiki-input:focus { border-color: var(--primary); }
+.wiki-save { border: none; background: var(--primary); color: #fff; border-radius: 8px; padding: 8px 16px; font-size: 13px; }
+.wiki-save:disabled { opacity: .5; }
+.wiki-list { display: flex; flex-direction: column; gap: 8px; }
+.wiki-item { border: 1px solid #eee9f7; border-radius: 10px; padding: 10px 12px; background: #fdfcff; }
+.wi-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wi-cat { font-size: 10.5px; color: #6f63b8; background: #f2eefc; padding: 1px 7px; border-radius: 8px; flex: none; }
+.wi-main b { font-size: 13.5px; }
+.wi-value { font-size: 13px; color: #4a4360; }
+.wi-foot { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
+.wi-ev { font-size: 11px; color: #b9b3c9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
+.wi-src { font-size: 11px; color: #9a94ab; margin-left: auto; white-space: nowrap; }
+.wi-del { border: none; background: transparent; color: #d9a0ac; font-size: 12px; cursor: pointer; padding: 0 4px; }
+.wi-del:hover { color: #d9536b; }
+.wiki-empty { font-size: 13px; color: var(--text-soft); text-align: center; padding: 22px 0; }
 
 .heatmap { overflow-x: auto; }
 .hm-weekdays { display: flex; gap: 4px; margin-left: 0; color: var(--text-soft); font-size: 11px; margin-bottom: 4px; }

@@ -9,6 +9,14 @@ from fastapi.testclient import TestClient
 
 os.environ["DB_PATH"] = os.path.join(
     tempfile.gettempdir(), f"test_feat_{int(time.time() * 1000)}.db")
+# 测试隔离：禁用真实 LLM 调用（不消耗额度；LLM 链路用打桩单独测）
+os.environ["LLM_ENABLED"] = "false"
+
+# 测试环境放宽限流（TestClient 共享同一 IP，会触发注册/登录限流——
+# 限流本身的正确性已在独立脚本中验证：第11次触发429）
+from app.security.rate_limit import register_limiter, login_limiter, api_limiter  # noqa: E402
+for _lim in (register_limiter, login_limiter, api_limiter):
+    _lim.max_requests = 100000
 
 from app.main import app  # noqa: E402
 
@@ -197,19 +205,29 @@ def test_avatar_phone_and_session_rename(client):
                       json={"phone": "13966660001"}).status_code == 400
     assert client.put("/api/auth/me", headers=h,
                       json={"phone": "13966660001", "old_password": "bad"}).status_code == 400
-    # 占用：先注册另一个账号
-    client.post("/api/auth/register",
-                json={"phone": "13966660002", "password": "pass123", "nickname": "占位"})
-    assert client.put("/api/auth/me", headers=h,
-                      json={"phone": "13966660002", "old_password": "pass123"}).status_code == 409
+    # 占用：先注册另一个账号（随机尾号避免残留冲突；确保注册成功后再断言 409）
+    import random as _rnd
+    _occ = f"1396666{_rnd.randint(1000, 9999)}"
+    rr = client.post("/api/auth/register",
+                     json={"phone": _occ, "password": "pass123", "nickname": "占位"})
+    assert rr.status_code == 200, f"占位账号注册失败: {rr.status_code} {rr.text[:100]}"
+    # 占用手机号改号 → 409
+    r409 = client.put("/api/auth/me", headers=h,
+                      json={"phone": _occ, "old_password": "pass123"})
+    assert r409.status_code == 409, f"预期409得到{r409.status_code}"
+
+    # 正常修改：随机新号（避开 _occ）
+    _new = _occ  # 循环直到拿到不同于 _occ 的号
+    while _new == _occ:
+        _new = f"1396666{_rnd.randint(1000, 9999)}"
 
     # 正常修改并可用新手机号登录
     r = client.put("/api/auth/me", headers=h,
-                   json={"phone": "13966660001", "old_password": "pass123"})
+                   json={"phone": _new, "old_password": "pass123"})
     assert r.status_code == 200, r.text
-    assert r.json()["phone"] == "13966660001"
+    assert r.json()["phone"] == _new
     assert client.post("/api/auth/login",
-                       json={"phone": "13966660001", "password": "pass123"}).status_code == 200
+                       json={"phone": _new, "password": "pass123"}).status_code == 200
 
     # 会话重命名
     sid = client.post("/api/chat/sessions", json={"title": "新的对话"}, headers=h).json()["id"]
@@ -478,7 +496,7 @@ def test_dialog_flow_intelligence(client):
     # 4) 双引擎校验：LLM 返回非法值 → 规则引擎接管
     from app.emotion import analyzer, llm as llm_mod
 
-    async def _fake_bad(text):
+    async def _fake_bad(text, model=None):
         return {"emotion_type": "不存在的情绪", "polarity": "positive",
                 "score": 5.0, "heal_score": -1.0, "high_risk": [],
                 "suggestion": "", "source": "llm"}
@@ -493,7 +511,7 @@ def test_dialog_flow_intelligence(client):
         llm_mod.analyze = orig
 
     # 5) LLM 漏报危机 → 规则引擎兜底（宁误报不漏报）
-    async def _fake_miss_crisis(text):
+    async def _fake_miss_crisis(text, model=None):
         return {"emotion_type": "中性", "polarity": "neutral",
                 "score": 0.1, "heal_score": 0.1, "high_risk": [],
                 "suggestion": "", "source": "llm"}
@@ -504,6 +522,455 @@ def test_dialog_flow_intelligence(client):
         assert result["high_risk"], "规则引擎的危机底线必须保留"
     finally:
         llm_mod.analyze = orig
+
+
+def test_user_portrait(client):
+    """用户画像：结构化输出、话题提取、提示词注入。"""
+    token = _token(client, "13966662000")
+    h = {"Authorization": f"Bearer {token}"}
+
+    r = client.post("/api/chat/sessions", json={"title": "画像测试", "persona_id": "nuan"},
+                    headers=h)
+    sid = r.json()["id"]
+    for msg in ["最近天天加班到很晚，好累", "老板又临时改需求，烦死了", "晚上总是睡不着，脑子停不下来"]:
+        client.post(f"/api/chat/sessions/{sid}/messages", json={"content": msg}, headers=h)
+
+    r = client.get("/api/profile/me/portrait?days=90", headers=h)
+    assert r.status_code == 200, r.text
+    p = r.json()
+    assert p["basic"]["stage"] in ("新朋友", "熟悉的朋友", "老朋友")
+    assert p["emotion"]["total_records"] >= 3, p["emotion"]
+    assert p["summary"], p
+    assert isinstance(p["facts"], list) and p["facts"], p["facts"]
+    topics = {t["name"] for t in p["topics"]}
+    assert "工作" in topics, topics
+    assert p["emotion"]["dominant"], p["emotion"]
+
+    # 画像卡注入角色提示词（含使用约束）
+    from app.database import SessionLocal
+    from app.services import profile_service
+    uid = client.get("/api/auth/me", headers=h).json()["id"]
+    db = SessionLocal()
+    try:
+        text = profile_service.build_prompt_card(db, uid)
+        assert "用户画像卡" in text, text[:200]
+        assert ("工作" in text) or ("加班" in text), text[:300]
+        assert "不要机械罗列" in text
+    finally:
+        db.close()
+
+    # 未登录不可访问
+    assert client.get("/api/profile/me/portrait").status_code == 401
+
+
+def test_user_memory_wiki(client):
+    """记忆维基（LLM Wiki）：规则抽取、合并去重、修订、注入与用户纠错。"""
+    import asyncio as _asyncio
+    from app.services import wiki_service as ws
+
+    token = _token(client, "13966663000")
+    h = {"Authorization": f"Bearer {token}"}
+
+    # 1) 发送含自述事实的消息（规则编译通道）
+    r = client.post("/api/chat/sessions", json={"title": "维基测试", "persona_id": "nuan"}, headers=h)
+    sid = r.json()["id"]
+    r = client.post(f"/api/chat/sessions/{sid}/messages",
+                    json={"content": "我今年24岁，住在杭州，养了一只猫"}, headers=h)
+    assert r.status_code == 200, r.text
+
+    # 2) 直接调用编译（不等 6 条阈值，先验证编译正确性）
+    from app.database import SessionLocal
+    db = SessionLocal()
+    try:
+        uid = client.get("/api/auth/me", headers=h).json()["id"]
+        _asyncio.run(ws.compile_wiki(db, uid))
+        entries = ws.get_wiki(db, uid)
+        keys = {e["key"] for e in entries}
+        assert "年龄段" in keys or "居住地" in keys or "养的宠物" in keys, keys
+        assert all(e["value"] for e in entries)
+        assert all(e["evidence"] for e in entries), "每条事实必须带依据"
+
+        # 3) 同一事实再次提及 → 不重复堆积
+        n_before = len(entries)
+        db2n = _asyncio.run(ws.compile_wiki(db, uid))
+        entries2 = ws.get_wiki(db, uid)
+        assert len(entries2) <= n_before + 2, (n_before, len(entries2))
+
+        # 4) 修订：同类事实新说法覆盖旧说法
+        ws.apply_updates(db, uid, [{"existing_key": "年龄段", "value": "用户25岁（刚过生日）",
+                                    "evidence": "我25岁了"}])
+        e = [x for x in ws.get_wiki(db, uid) if x["key"] == "年龄段"]
+        if e:
+            assert "25" in e[0]["value"]
+
+        # 5) 提示词注入：含分类与使用约束
+        prompt = ws.build_wiki_prompt(db, uid)
+        assert "用户记忆维基" in prompt or "基本情况" in prompt, prompt[:200]
+    finally:
+        db.close()
+
+    # 6) 接口：读取 / 用户补充 / 删除纠错
+    r = client.get("/api/profile/me/wiki", headers=h)
+    assert r.status_code == 200
+    wk = r.json()
+    assert "entries" in wk and "stats" in wk and "markdown" in wk
+
+    r = client.post("/api/profile/me/wiki", headers=h,
+                    json={"key": "养的宠物", "value": "一只叫团团的橘猫", "category": "重要他人"})
+    assert r.status_code == 200, r.text
+    eid = r.json()["id"]
+    wk2 = client.get("/api/profile/me/wiki", headers=h).json()
+    assert any(e["id"] == eid and e["pinned"] and e["source"] == "user" for e in wk2["entries"])
+
+    assert client.delete(f"/api/profile/me/wiki/{eid}", headers=h).status_code == 200
+    wk3 = client.get("/api/profile/me/wiki", headers=h).json()
+    assert all(e["id"] != eid for e in wk3["entries"])
+    assert client.delete("/api/profile/me/wiki/999999", headers=h).status_code == 404
+    assert client.get("/api/profile/me/wiki").status_code == 401
+
+
+def test_fortune_zone(client):
+    """测测专区：每日运势（确定性）、八字锚点、紫微结构、鉴权。"""
+    token = _token(client, "13966664000")
+    h = {"Authorization": f"Bearer {token}"}
+
+    # 1) 每日运势：确定性 + 结构
+    r1 = client.get("/api/fortune/daily", headers=h)
+    assert r1.status_code == 200, r1.text
+    d1 = r1.json()
+    assert 20 <= d1["scores"]["overall"]["value"] <= 98, d1["scores"]["overall"]
+    assert len(d1["do"]) == 3 and len(d1["avoid"]) == 2
+    assert d1["lucky_color"] and d1["lucky_number"]
+    assert d1["ganzhi"]["day"], d1["ganzhi"]
+    r2 = client.get("/api/fortune/daily", headers=h)
+    assert r2.json() == d1, "同一用户同一天的运势必须一致"
+    # 不同用户结果可不同（至少字段结构稳定）
+    token_b = _token(client, "13966664001")
+    hb = {"Authorization": f"Bearer {token_b}"}
+    db_ = client.get("/api/fortune/daily", headers=hb).json()
+    assert db_["date"] == d1["date"]
+    # 生肖参数参与种子
+    dz = client.get("/api/fortune/daily?shengxiao=龙", headers=h).json()
+    assert dz["shengxiao"] == "龙"
+    # 非法生肖回落通用
+    dx = client.get("/api/fortune/daily?shengxiao=xx", headers=h).json()
+    assert dx["shengxiao"] is None
+
+    # 2) 八字：锚点 2000-01-01 10:00 → 己卯 丙子 戊午 丁巳
+    r = client.post("/api/fortune/bazi", headers=h,
+                    json={"birth_date": "2000-01-01", "birth_hour": 10, "gender": "女"})
+    assert r.status_code == 200, r.text
+    b = r.json()
+    pillars = [p["gz"] for p in b["pillars"]]
+    assert pillars == ["己卯", "丙子", "戊午", "丁巳"], pillars
+    assert b["shengxiao"] == "兔" and "农历" in b["lunar_date"]
+    assert sum(b["wuxing"].values()) == 8
+    assert b["day_master"]["gan"] == "戊"
+    assert b["missing"] == ["金"], b["missing"]
+    assert b["summary"]
+    # 未知时辰也可排盘（默认午时）
+    r = client.post("/api/fortune/bazi", headers=h,
+                    json={"birth_date": "1995-06-15", "gender": "男"})
+    assert r.status_code == 200 and len(r.json()["pillars"]) == 4
+    # 非法日期
+    assert client.post("/api/fortune/bazi", headers=h,
+                       json={"birth_date": "2000-13-99"}).status_code in (400, 422)
+
+    # 3) 紫微：12 宫 + 14 主星各一次 + 命宫信息
+    r = client.post("/api/fortune/ziwei", headers=h,
+                    json={"birth_date": "2000-01-01", "birth_hour": 10, "gender": "女"})
+    assert r.status_code == 200, r.text
+    z = r.json()
+    assert len(z["board"]) == 12
+    stars = [s for p in z["board"] for s in p["stars"]]
+    assert len(stars) == 14 and len(set(stars)) == 14, stars
+    assert z["ming"]["ju"] in ("水二局", "木三局", "金四局", "土五局", "火六局")
+    assert z["ming"]["gong_zhi"] == "未" and z["ming"]["gong_gan_zhi"] == "辛未", z["ming"]
+    assert z["ming"]["summary"]
+    for p in z["board"]:
+        assert p["interpretation"], p
+    # 每宫解读含星名或空宫说明
+    ming = z["board"][0]
+    assert ming["is_ming"]
+
+    # 4) 紫微多边界日期防回归（含之前触发 UnboundLocalError 的 2100-01-01）
+    for bd in ["2100-01-01", "2000-02-29", "1900-01-01", "2026-11-05"]:
+        for bh in [None, 0, 10, 23]:
+            r = client.post("/api/fortune/ziwei", headers=h,
+                            json={"birth_date": bd, "birth_hour": bh, "gender": "女"})
+            assert r.status_code == 200, f"{bd} h={bh}: {r.status_code} {r.text[:100]}"
+            assert r.json()["ming"]["summary"], bd
+
+    # 4.5) 星曜亮度：每颗主星都带亮度标注
+    from app.fortune.ziwei import star_brightness, BRIGHTNESS, BRIGHT_ORDER
+    # 查表锚点
+    assert star_brightness("太阳", "午")["level"] == "庙"
+    assert star_brightness("太阳", "子")["level"] == "陷"
+    assert star_brightness("太阴", "亥")["level"] == "庙"
+    # 14 星 × 12 地支全部覆盖
+    for star, table in BRIGHTNESS.items():
+        assert len(table) == 12, star
+        assert all(v in BRIGHT_ORDER for v in table.values()), star
+    # 排盘结果每宫有 brightness
+    for p in z["board"]:
+        for b in p.get("brightness", []):
+            assert b["level"] in BRIGHT_ORDER and 0 <= b["rank"] <= 6, b
+
+    # 4.6) 三方四正 + 大限 + 流年
+    from app.fortune.ziwei import ZHI as _ZHI
+    bd = z["board"]
+    for p in bd:
+        # 对宫地支相隔 6
+        dui = bd[p["sanfang"]["dui"]]
+        assert (_ZHI.index(p["zhi"]) + 6) % 12 == _ZHI.index(dui["zhi"]), p["palace"]
+        # 三合地支相隔 4/8
+        for hi in p["sanfang"]["he"]:
+            diff = (_ZHI.index(bd[hi]["zhi"]) - _ZHI.index(p["zhi"])) % 12
+            assert diff in (4, 8), (p["palace"], diff)
+        # 大限年龄段
+        assert p["daxian"]["to"] - p["daxian"]["from"] == 9, p["palace"]
+    # 12 步大限起点互不相同（无重叠）
+    starts = sorted(p["daxian"]["from"] for p in bd)
+    assert len(set(starts)) == 12
+    assert starts[0] == {"水二局": 2, "木三局": 3, "金四局": 4, "土五局": 5, "火六局": 6}[z["ming"]["ju"]]
+    # 恰有一个流年命宫（年支落一宫）
+    ln = [p for p in bd if p["is_liunian"]]
+    assert len(ln) == 1 and ln[0]["zhi"] == z["liunian"]["zhi"]
+    # 大限方向随性别切换
+    z_m = client.post("/api/fortune/ziwei", headers=h,
+                      json={"birth_date": "2000-01-01", "birth_hour": 10, "gender": "男"}).json()
+    dirs = {z["daxian"]["direction"], z_m["daxian"]["direction"]}
+    assert dirs == {"顺行", "逆行"}, dirs
+
+    # 4.7) 辅星（六吉六煞+禄存天马）：每盘约 16 颗、全部落宫且有解读
+    from app.fortune.ziwei import AUX_STARS
+    aux_total = sum(len(p.get("aux", [])) for p in bd)
+    assert 14 <= aux_total <= 16, aux_total
+    valid_aux = set(AUX_STARS)
+    for p in bd:
+        for a in p.get("aux", []):
+            assert a["star"] in valid_aux
+            assert a["type"] in ("吉", "煞")
+        # 带辅星的宫，解读中应有"吉星相伴"或"煞星提醒"
+        if p.get("aux"):
+            assert ("吉星相伴" in p["interpretation"] or "煞星提醒" in p["interpretation"]), p["palace"]
+
+    # 4.8) 八字大运：任意日期查询（对应“点击大运卡片跳转”场景）
+    r = client.post("/api/fortune/dayun", headers=h,
+                    json={"birth_date": "2000-01-01", "birth_hour": 10,
+                          "gender": "女", "query_date": "2040-06-15"})
+    assert r.status_code == 200, r.text
+    dy = r.json()
+    assert dy["query_date"] == "2040-06-15"
+    cd = dy["current_dayun"]
+    assert cd["gz"] and 0 <= cd["index"] < len(dy["dayun"]), cd
+    # 2040-2000=40 岁，应落在 current_dayun 的年龄区间内
+    assert cd["age_from"] <= 40 < cd["age_to"], cd
+    assert isinstance(dy["interactions"], list)
+    for it in dy["interactions"]:
+        assert it["type"] and it["detail"] and it["analysis"], it
+    # 8 步大运都有年龄区间与五行
+    for d in dy["dayun"]:
+        assert d["age_from"] < d["age_to"] and d["wuxing_gan"] and d["wuxing_zhi"], d
+    # 默认当天也可查
+    r2 = client.post("/api/fortune/dayun", headers=h,
+                     json={"birth_date": "2000-01-01", "birth_hour": 10, "gender": "女"})
+    assert r2.status_code == 200 and r2.json()["query_date"], r2.text
+
+    # 4.9) 紫微流年盘：以指定宫为流年命宫重排十二宫
+    qy_zhi = z["board"][6]["zhi"]  # 迁移宫地支
+    r = client.post("/api/fortune/ziwei", headers=h,
+                    json={"birth_date": "2000-01-01", "birth_hour": 10, "gender": "女",
+                          "liunian_gong_zhi": qy_zhi, "liunian_year": 2026})
+    assert r.status_code == 200, r.text
+    lp = r.json()
+    assert "liunian_pan" not in z  # 不带参数的老响应不受影响
+    pan = lp["liunian_pan"]
+    assert pan["ming_zhi"] == qy_zhi and pan["source_palace"] == "迁移宫", pan
+    lbd = pan["board"]
+    # 第 0 宫为流年命宫且地支正确；十二宫名从流年命宫起逆布
+    assert lbd[0]["palace"] == "流年命宫" and lbd[0]["zhi"] == qy_zhi
+    ln_zi = _ZHI.index(qy_zhi)
+    for i, p in enumerate(lbd):
+        assert (_ZHI.index(p["zhi"]) - (ln_zi - i)) % 12 == 0, (i, p["palace"])
+    # 星曜按地支落位不动（与本命盘同地支宫的星一致）
+    for p in z["board"]:
+        for q in lbd:
+            if p["zhi"] == q["zhi"]:
+                assert p["stars"] == q["stars"], (p["palace"], q["palace"])
+    # 流年盘三方四正：对宫隔 6、三合隔 4/8
+    for p in lbd:
+        dui = lbd[p["sanfang"]["dui"]]
+        assert (_ZHI.index(p["zhi"]) + 6) % 12 == _ZHI.index(dui["zhi"]), p["palace"]
+        for hi in p["sanfang"]["he"]:
+            assert (_ZHI.index(lbd[hi]["zhi"]) - _ZHI.index(p["zhi"])) % 12 in (4, 8), p["palace"]
+        assert p["interpretation"] and p["stars_label"] is not None
+    # 流年四化：按流年天干查表，恰 4 条且与 SIHUA 表一致
+    from app.fortune.bazi import SIHUA as _BZ_SIHUA
+    expect = [f"{sname}{lab}" for lab, sname in zip(["化禄", "化权", "化科", "化忌"],
+                                                    _BZ_SIHUA[pan["year_stem"]])]
+    got = [it.split("（")[0].rstrip("：") for it in pan["sihua"]["items"]]
+    assert got == expect, got
+    # 非法宫位忽略；非法年份被 pydantic 拒绝；不带参数不生成流年盘
+    r = client.post("/api/fortune/ziwei", headers=h,
+                    json={"birth_date": "2000-01-01", "birth_hour": 10, "gender": "女",
+                          "liunian_gong_zhi": "不是地支"})
+    assert r.status_code == 200 and "liunian_pan" not in r.json()
+    r = client.post("/api/fortune/ziwei", headers=h,
+                    json={"birth_date": "2000-01-01", "birth_hour": 10, "gender": "女",
+                          "liunian_gong_zhi": "午", "liunian_year": 9999})
+    assert r.status_code == 422
+
+    # 5) 鉴权：未登录 401
+    assert client.get("/api/fortune/daily").status_code == 401
+    assert client.post("/api/fortune/bazi", json={"birth_date": "2000-01-01"}).status_code == 401
+    assert client.post("/api/fortune/ziwei", json={"birth_date": "2000-01-01"}).status_code == 401
+    assert client.post("/api/fortune/dayun", json={"birth_date": "2000-01-01",
+                                                    "query_date": "2026-01-01"}).status_code == 401
+
+
+def test_llm_model_pool(client):
+    """模型池：用户端可选模型 / 偏好保存 / 管理端额度与用量统计接口。"""
+    token = _token(client, "13977770000")
+    h = {"Authorization": f"Bearer {token}"}
+
+    # 1) 用户端：可选模型列表（种子 4 个通义千问）
+    r = client.get("/api/chat/models", headers=h)
+    assert r.status_code == 200, r.text
+    data = r.json()
+    ids = [m["id"] for m in data["models"]]
+    assert len(ids) >= 4, ids
+    assert {"qwen-plus", "qwen-flash", "qwen3.5-plus", "qwen3.5-flash"} <= set(ids), ids
+    assert data["current"] in ids, (data["current"], ids)
+    assert any(m["is_default"] for m in data["models"])
+    assert all(m["name"] for m in data["models"])
+
+    # 2) 选择模型并持久化
+    assert client.post("/api/chat/model", headers=h,
+                       json={"model": "qwen-flash"}).status_code == 200
+    assert client.get("/api/chat/models", headers=h).json()["current"] == "qwen-flash"
+    # 非法模型拒绝
+    assert client.post("/api/chat/model", headers=h,
+                       json={"model": "no-such-model"}).status_code == 400
+
+    # 3) 未登录 401
+    assert client.get("/api/chat/models").status_code == 401
+
+    # 4) 管理端：模型总览（额度/已用/剩余字段齐全）
+    a = client.post("/api/auth/login", json={"phone": "13800000000", "password": "admin123"})
+    ah = {"Authorization": "Bearer " + a.json()["token"]}
+    r = client.get("/api/admin/llm/models", headers=ah)
+    assert r.status_code == 200, r.text
+    ov = r.json()
+    assert ov["summary"]["total_models"] >= 4
+    for m in ov["models"]:
+        for k in ("free_quota_tokens", "used_total", "used_today",
+                  "remaining", "calls_today", "calls_total", "enabled", "is_default"):
+            assert k in m, (k, m)
+        # 剩余 = max(0, 额度 - 累计已用)
+        assert m["remaining"] == max(0, m["free_quota_tokens"] - m["used_total"]), m
+
+    # 5) 改额度 → 剩余同步
+    target = next(m for m in ov["models"] if m["model_id"] == "qwen-flash")
+    old_quota = target["free_quota_tokens"]
+    assert client.put(f"/api/admin/llm/models/{target['id']}", headers=ah,
+                      json={"free_quota_tokens": 5_000_000}).status_code == 200
+    t2 = next(m for m in client.get("/api/admin/llm/models", headers=ah).json()["models"]
+              if m["model_id"] == "qwen-flash")
+    assert t2["free_quota_tokens"] == 5_000_000
+    assert t2["remaining"] == max(0, 5_000_000 - t2["used_total"])
+    assert client.put(f"/api/admin/llm/models/{target['id']}", headers=ah,
+                      json={"free_quota_tokens": old_quota}).status_code == 200
+
+    # 6) 新增 + 重复拒绝 + 删除
+    r = client.post("/api/admin/llm/models", headers=ah,
+                    json={"model_id": "test-model-x", "display_name": "测试模型",
+                          "free_quota_tokens": 1000})
+    assert r.status_code == 200, r.text
+    tid = r.json()["id"]
+    assert client.post("/api/admin/llm/models", headers=ah,
+                       json={"model_id": "test-model-x"}).status_code == 400
+    assert client.delete(f"/api/admin/llm/models/{tid}", headers=ah).status_code == 200
+
+    # 7) 默认模型保护：不能停用/删除
+    dflt = next(m for m in ov["models"] if m["is_default"])
+    assert client.put(f"/api/admin/llm/models/{dflt['id']}", headers=ah,
+                      json={"enabled": False}).status_code == 400
+    assert client.delete(f"/api/admin/llm/models/{dflt['id']}", headers=ah).status_code == 400
+
+    # 8) 用量接口结构 + 普通用户不可访问管理端
+    r = client.get("/api/admin/llm/usage?days=7", headers=ah)
+    assert r.status_code == 200
+    u = r.json()
+    assert {"days", "by_day", "by_model", "recent"} <= set(u.keys()), u
+    assert client.get("/api/admin/llm/models", headers=h).status_code == 403
+
+
+def test_llm_usage_recorded(client):
+    """LLM 调用成功后 token 用量落库（打桩 LLM，不触真实 API）。"""
+    from app.config import settings
+    from app.services import llm_reply
+    from app.emotion import llm as emotion_llm
+    from app.models import LLMUsageLog
+    from app.database import SessionLocal
+
+    token = _token(client, "13977770001")
+    h = {"Authorization": f"Bearer {token}"}
+    uid = client.get("/api/auth/me", headers=h).json()["id"]
+    sid = client.post("/api/chat/sessions", json={"title": "token测试"},
+                      headers=h).json()["id"]
+
+    async def fake_analyze(text, model=None):
+        return {"emotion_type": "焦虑", "polarity": "negative", "score": 0.7,
+                "heal_score": 0.6, "high_risk": [], "suggestion": "",
+                "source": "llm", "model": model or "qwen-plus",
+                "usage": {"prompt_tokens": 80, "completion_tokens": 20,
+                          "total_tokens": 100}}
+
+    async def fake_call_llm(emotion, user_message, history, profile_text, intent,
+                            persona_id, strategy_text="", length_text="", model=None):
+        return "打桩回复", {"prompt_tokens": 200, "completion_tokens": 50,
+                            "total_tokens": 250}
+
+    orig_enabled = settings.LLM_ENABLED
+    orig_analyze = emotion_llm.analyze
+    orig_call = llm_reply._call_llm
+    try:
+        settings.LLM_ENABLED = True
+        emotion_llm.analyze = fake_analyze
+        llm_reply._call_llm = fake_call_llm
+        r = client.post(f"/api/chat/sessions/{sid}/messages",
+                        json={"content": "压力大睡不着", "model": "qwen-flash"},
+                        headers=h)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["emotion"]["source"] == "llm", body["emotion"]
+        assert body["reply_source"] == "llm", body["reply_source"]
+    finally:
+        settings.LLM_ENABLED = orig_enabled
+        emotion_llm.analyze = orig_analyze
+        llm_reply._call_llm = orig_call
+
+    # 两条用量：analyze(100) + reply(250)，模型为请求指定的 qwen-flash
+    db = SessionLocal()
+    try:
+        rows = (db.query(LLMUsageLog)
+                .filter(LLMUsageLog.user_id == uid)
+                .order_by(LLMUsageLog.id).all())
+        assert len(rows) == 2, [(r.scene, r.total_tokens) for r in rows]
+        assert {r.scene for r in rows} == {"analyze", "reply"}
+        assert sum(r.total_tokens for r in rows) == 350
+        assert all(r.model == "qwen-flash" for r in rows), [r.model for r in rows]
+    finally:
+        db.close()
+
+    # 管理端统计能反映这 350 token
+    a = client.post("/api/auth/login", json={"phone": "13800000000", "password": "admin123"})
+    ah = {"Authorization": "Bearer " + a.json()["token"]}
+    ov = client.get("/api/admin/llm/models", headers=ah).json()
+    flash = next(m for m in ov["models"] if m["model_id"] == "qwen-flash")
+    assert flash["used_total"] >= 350, flash
+    assert flash["calls_total"] >= 2, flash
 
 
 if __name__ == "__main__":
@@ -518,4 +985,9 @@ if __name__ == "__main__":
         test_admin_platform(client)
         test_points_knowledge_healroom(client)
         test_dialog_flow_intelligence(client)
+        test_user_portrait(client)
+        test_user_memory_wiki(client)
+        test_fortune_zone(client)
+        test_llm_model_pool(client)
+        test_llm_usage_recorded(client)
     print("新功能测试全部通过")

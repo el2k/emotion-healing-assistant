@@ -14,6 +14,7 @@ const routes = [
   { path: '/knowledge', name: 'knowledge', component: () => import('../views/Knowledge.vue') },
   { path: '/knowledge/:id', name: 'knowledge-detail', component: () => import('../views/KnowledgeDetail.vue') },
   { path: '/heal', name: 'heal', component: () => import('../views/HealRoom.vue') },
+  { path: '/fortune', name: 'fortune', component: () => import('../views/Fortune.vue') },
   {
     path: '/admin',
     component: () => import('../views/admin/AdminLayout.vue'),
@@ -27,6 +28,8 @@ const routes = [
       { path: 'personas', name: 'admin-personas', component: () => import('../views/admin/Personas.vue'), meta: { title: '角色运营' } },
       { path: 'forum', name: 'admin-forum', component: () => import('../views/admin/Forum.vue'), meta: { title: '社区审核' } },
       { path: 'sessions', name: 'admin-sessions', component: () => import('../views/admin/Sessions.vue'), meta: { title: '会话抽查' } },
+      { path: 'observability', name: 'admin-observability', component: () => import('../views/admin/Observability.vue'), meta: { title: '可观测性' } },
+      { path: 'models', name: 'admin-models', component: () => import('../views/admin/Models.vue'), meta: { title: '模型管理' } },
       { path: 'system', name: 'admin-system', component: () => import('../views/admin/System.vue'), meta: { title: '系统信息' } },
     ],
   },

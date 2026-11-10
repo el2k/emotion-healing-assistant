@@ -57,6 +57,7 @@
           <button class="claim-btn" :disabled="claiming || points.claimed_today" @click="claim">
             {{ points.claimed_today ? '今日已领取 ✓' : `领取 ${points.daily_amount} 积分` }}
           </button>
+          <button class="recharge-btn" @click="showRecharge = true">💎 积分充值</button>
           <div class="history">
             <div v-for="(r, i) in points.history.slice(0, 5)" :key="i" class="h-row">
               <span>{{ reasonText(r.reason) }}</span>
@@ -65,6 +66,42 @@
             </div>
             <div v-if="!points.history.length" class="h-empty">还没有积分记录</div>
           </div>
+        </div>
+      </div>
+
+      <!-- 充值弹窗 -->
+      <div v-if="showRecharge" class="recharge-mask" @click.self="showRecharge = false">
+        <div class="recharge-modal card">
+          <div class="rc-head">
+            <h3>💎 积分充值</h3>
+            <button class="rc-close" @click="showRecharge = false">✕</button>
+          </div>
+          <p class="rc-demo-tip">🎮 演示模式：点击「模拟支付」即可到账，无需真实付款</p>
+
+          <div class="rc-methods">
+            <button class="rc-method" :class="{ on: payMethod === 'wechat' }" @click="payMethod = 'wechat'">
+              <span class="rm-icon wechat">💬</span>微信支付
+            </button>
+            <button class="rc-method" :class="{ on: payMethod === 'alipay' }" @click="payMethod = 'alipay'">
+              <span class="rm-icon alipay">🅰</span>支付宝
+            </button>
+          </div>
+
+          <div class="rc-plans">
+            <div v-for="p in plans" :key="p.id" class="rc-plan"
+                 :class="{ selected: selectedPlan?.id === p.id }" @click="selectedPlan = p">
+              <b class="rp-points">{{ p.points.toLocaleString() }}<i>积分</i></b>
+              <span class="rp-bonus" v-if="p.bonus > 0">+{{ p.bonus }}% 赠</span>
+              <span class="rp-amount">¥{{ p.amount_yuan }}</span>
+            </div>
+          </div>
+
+          <button class="rc-pay" :disabled="!selectedPlan || paying" @click="doPay">
+            {{ paying ? '处理中…' : selectedPlan
+                ? `确认支付 ¥${selectedPlan.amount_yuan}（${selectedPlan.points} 积分）`
+                : '请选择套餐' }}
+          </button>
+          <p v-if="payResult" class="rc-result" :class="{ ok: payResult.ok }">{{ payResult.message }}</p>
         </div>
       </div>
 
@@ -153,7 +190,45 @@ const emojiList = ['🌙', '🌿', '🌸', '🐳', '🐱', '🐰', '😊', '🍀
 
 const points = ref({ balance: 0, claimed_today: false, daily_amount: 100, chat_cost: 2, history: [] })
 const claiming = ref(false)
-const reasonText = (r) => ({ daily_claim: '每日签到', chat: '聊天消耗', admin_adjust: '管理员调整' }[r] || r)
+const reasonText = (r) => ({ daily_claim: '每日签到', chat: '聊天消耗', admin_adjust: '管理员调整', recharge: '充值到账' }[r] || r)
+
+/* ===== 充值 ===== */
+const showRecharge = ref(false)
+const plans = ref([])
+const payMethod = ref('wechat')
+const selectedPlan = ref(null)
+const paying = ref(false)
+const payResult = ref(null)
+
+async function loadPlans() {
+  try {
+    const { data } = await api.get('/payments/plans')
+    plans.value = data.plans || []
+  } catch (e) { /* 忽略 */ }
+}
+
+async function doPay() {
+  if (!selectedPlan.value) return
+  paying.value = true
+  payResult.value = null
+  try {
+    // 1. 创建订单
+    const { data: order } = await api.post('/payments/create', {
+      plan_id: selectedPlan.value.id,
+      method: payMethod.value,
+    })
+    // 2. 确认支付（Demo 模式直接到账；生产模式此处跳转支付扫码页）
+    const { data: result } = await api.post(`/payments/${order.order_id}/confirm`)
+    payResult.value = result
+    if (result.ok) {
+      loadPoints()
+    }
+  } catch (e) {
+    payResult.value = { ok: false, message: e.response?.data?.detail || '支付失败，请重试' }
+  } finally {
+    paying.value = false
+  }
+}
 
 async function loadPoints() {
   try {
@@ -273,7 +348,7 @@ async function doLogout() {
   router.push('/login')
 }
 
-onMounted(() => { load(); loadPoints() })
+onMounted(() => { load(); loadPoints()/* ; loadOrders() */; loadPlans() })
 </script>
 
 <style scoped>
@@ -321,6 +396,32 @@ onMounted(() => { load(); loadPoints() })
 .h-row b.neg { color: #d9536b; }
 .h-time { font-size: 11.5px; color: #b9b3c9; white-space: nowrap; }
 .h-empty { font-size: 12.5px; color: var(--text-soft); text-align: center; padding: 8px 0; }
+
+/* 充值 */
+.recharge-btn { border: none; background: linear-gradient(135deg, #4a6bd0, #6f8fe8); color: #fff; border-radius: 10px; padding: 11px 16px; font-size: 14px; font-weight: 600; box-shadow: 0 5px 14px rgba(74,107,208,.28); margin-top: 2px; }
+.recharge-mask { position: fixed; inset: 0; background: rgba(30,24,48,.5); display: flex; align-items: center; justify-content: center; z-index: 150; padding: 20px; }
+.recharge-modal { width: 480px; max-width: 100%; padding: 24px 26px; }
+.rc-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.rc-close { border: none; background: #f6f2fd; color: #7a7290; width: 28px; height: 28px; border-radius: 8px; cursor: pointer; }
+.rc-demo-tip { font-size: 12px; color: #6f63b8; background: var(--primary-soft); padding: 7px 12px; border-radius: 8px; margin-bottom: 14px; }
+.rc-methods { display: flex; gap: 10px; margin-bottom: 14px; }
+.rc-method { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1.5px solid #e6dff5; background: #fbfaff; border-radius: 12px; padding: 12px; font-size: 14px; cursor: pointer; transition: all .15s; }
+.rc-method.on { border-color: var(--primary); background: var(--primary-soft); color: var(--primary); font-weight: 600; }
+.rm-icon { font-size: 18px; }
+.rm-icon.wechat { color: #07c160; }
+.rm-icon.alipay { color: #1677ff; }
+.rc-plans { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 16px; }
+.rc-plan { border: 1.5px solid #e6dff5; background: #fdfcff; border-radius: 12px; padding: 14px 12px; text-align: center; cursor: pointer; position: relative; transition: all .15s; }
+.rc-plan:hover { border-color: #c9b8f0; }
+.rc-plan.selected { border-color: var(--primary); background: #f5f1ff; box-shadow: 0 4px 12px rgba(124,111,208,.15); }
+.rp-points { font-size: 20px; color: #5f54a3; display: block; }
+.rp-points i { font-style: normal; font-size: 11px; color: var(--text-soft); margin-left: 3px; }
+.rp-bonus { position: absolute; top: 8px; right: 8px; background: #ff9a3d; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 8px; font-weight: 600; }
+.rp-amount { font-size: 14px; font-weight: 700; color: #333; display: block; margin-top: 4px; }
+.rc-pay { width: 100%; border: none; background: linear-gradient(135deg, var(--primary), var(--accent)); color: #fff; border-radius: 12px; padding: 13px; font-size: 15px; font-weight: 600; box-shadow: 0 6px 16px rgba(124,111,208,.3); }
+.rc-pay:disabled { opacity: .5; cursor: not-allowed; }
+.rc-result { margin-top: 12px; text-align: center; font-size: 13px; padding: 10px; border-radius: 10px; background: #fdeef0; color: #d9536b; }
+.rc-result.ok { background: #e9f8ef; color: #2f9e6b; }
 
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 16px; }
 .stat { padding: 16px; text-align: center; }

@@ -31,6 +31,7 @@ class MessageIn(BaseModel):
     content: str = Field(default="", max_length=2000)
     msg_type: str = "text"      # text / image / voice
     image_url: str = ""
+    model: str | None = None     # 本次使用的 LLM 模型（空=用户偏好/全局默认）
 
 
 class UserUpdateIn(BaseModel):

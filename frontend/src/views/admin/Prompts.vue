@@ -3,7 +3,7 @@
     <div class="a-head">
       <div>
         <h1>提示词管理</h1>
-        <p>角色卡提示词外置于 prompts/personas.md · 在线编辑热生效 · 自动备份可回滚</p>
+        <p>角色卡提示词外置于 prompts/personas.md · 单角色左编辑右实时渲染 · 保存热生效 · 自动备份可回滚</p>
       </div>
       <div class="a-head-actions">
         <span v-if="file.updated_at" class="src-time">源文件更新于 {{ timeText(file.updated_at) }}</span>
@@ -14,10 +14,10 @@
     <!-- Tabs -->
     <div class="p-tabs">
       <button v-for="t in tabs" :key="t.id" class="p-tab" :class="{ on: tab === t.id }"
-              @click="switchTab(t.id)">{{ t.label }}</button>
+              @click="tab = t.id">{{ t.label }}</button>
     </div>
 
-    <!-- ============ Tab 1: 角色提示词 ============ -->
+    <!-- ============ Tab 1: 角色提示词（单角色：左编辑 / 右实时渲染） ============ -->
     <div v-show="tab === 'personas'" class="p-flex">
       <div class="p-side card-lite">
         <input v-model="search" class="p-search" placeholder="搜索角色…" />
@@ -36,80 +36,83 @@
       <div v-if="current" class="p-editor card-lite">
         <div class="pe-head">
           <div class="pe-title">
-            <span class="pe-emoji">{{ form.emoji }}</span>
-            <b>{{ form.name }}</b>
-            <span class="pe-id">{{ current.readonly.id }} · {{ current.readonly.category }}<template v-if="current.readonly.work"> · {{ current.readonly.work }}</template></span>
+            <span class="pe-emoji">{{ titleEmoji }}</span>
+            <b>{{ titleName }}</b>
+            <span class="mdc-id">{{ current.readonly.id }}</span>
+            <span class="mdc-cat">{{ current.readonly.category }}</span>
+            <span v-if="current.readonly.heal_target" class="mdc-heal">{{ current.readonly.heal_target }}</span>
+            <span v-if="current.readonly.model_3d" class="mdc-3d">3D</span>
           </div>
           <div class="pe-actions">
-            <button class="a-btn ghost" :disabled="saving" @click="resetForm">重置</button>
-            <button class="a-btn" :disabled="saving" @click="savePersona">{{ saving ? '保存中…' : '保存（热生效）' }}</button>
+            <span class="save-state" :class="{ warn: personaMd !== personaDraft }">
+              {{ personaMd === personaDraft ? '已同步' : '有未保存修改' }}
+            </span>
+            <button class="a-btn ghost" :disabled="saving || personaMd === personaDraft" @click="resetPersona">放弃修改</button>
+            <button class="a-btn" :disabled="saving || personaMd === personaDraft" @click="savePersona">
+              {{ saving ? '校验保存中…' : '保存（热生效）' }}
+            </button>
           </div>
         </div>
 
-        <div class="pe-grid">
-          <div class="pe-form">
-            <div class="f-row2">
-              <label>显示名</label><input v-model="form.name" maxlength="30" />
-              <label>Emoji</label><input v-model="form.emoji" maxlength="8" />
-            </div>
-            <div class="f-row2">
-              <label>标签</label><input v-model="form.tag" maxlength="40" />
-              <label>主题色</label><input v-model="form.color" maxlength="16" placeholder="#7c6fd0" />
-            </div>
-            <div class="f-row1"><label>简介（角色卡片一句话）</label></div>
-            <textarea v-model="form.desc" rows="2" maxlength="200"></textarea>
-            <div class="f-row1"><label>性格 personality<span class="hint">驱动大模型扮演的核心人设</span></label></div>
-            <textarea v-model="form.personality" rows="2" maxlength="300"></textarea>
-            <div class="f-row1"><label>说话风格 speech</label></div>
-            <textarea v-model="form.speech" rows="2" maxlength="300"></textarea>
-            <div class="f-row1"><label>在意的事 cares</label></div>
-            <input v-model="form.cares" maxlength="120" />
-            <div class="f-row1"><label>口头禅 catchphrases<span class="hint">顿号「、」分隔多条</span></label></div>
-            <input v-model="form.catchphraseStr" maxlength="200" placeholder="我在呢、慢慢说" />
-            <div class="f-row1">
-              <label>兜底语料 voice<span class="hint">LLM 故障时的角色降级语料，每行一条</span></label>
-            </div>
-            <div class="v-cols">
-              <div><b>正向 pos</b><textarea v-model="form.voicePosStr" rows="3"></textarea></div>
-              <div><b>负向 neg</b><textarea v-model="form.voiceNegStr" rows="3"></textarea></div>
-              <div><b>中性 neu</b><textarea v-model="form.voiceNeuStr" rows="3"></textarea></div>
-            </div>
-            <p v-if="formError" class="f-err">{{ formError }}</p>
-          </div>
+        <p v-if="personaError" class="md-error">⚠ {{ personaError }}</p>
 
-          <div class="pe-preview">
-            <div class="pp-hd">
-              <b>实时预览 · 最终系统提示词</b>
-              <span :class="{ saving: previewLoading }">{{ previewLoading ? '更新中…' : '随表单自动刷新' }}</span>
+        <div class="pe-md-split">
+          <div class="md-edit-pane">
+            <div class="pane-hd">Markdown 源码 · 本角色</div>
+            <textarea ref="mdEditorRef" v-model="personaMd" class="md-editor" spellcheck="false" wrap="off"
+                      placeholder="## 角色名&#10;- id: xxx&#10;- personality: ……"></textarea>
+          </div>
+          <div class="md-preview-pane">
+            <div class="pane-hd">
+              实时渲染
+              <span v-if="unknownLines" class="pane-warn">⚠ {{ unknownLines }} 行格式异常（保存会被拒绝）</span>
+              <span v-else class="pane-ok">✓ 格式正确</span>
             </div>
-            <pre class="pp-body">{{ previewText }}</pre>
+            <div class="md-preview">
+              <div v-for="(b, bi) in previewBlocks" :key="bi" class="mdc-card">
+                <template v-if="b.type === 'card'">
+                  <div class="mdc-title">
+                    <span class="mdc-name">{{ b.title }}</span>
+                    <span v-for="f in b.fields.filter(x => x.key === 'id')" :key="'id'" class="mdc-id">{{ f.val }}</span>
+                    <span v-for="f in b.fields.filter(x => x.key === 'category')" :key="'cat'" class="mdc-cat">{{ f.val }}</span>
+                    <span v-for="f in b.fields.filter(x => x.key === 'heal_target')" :key="'ht'" class="mdc-heal">{{ f.val }}</span>
+                    <span v-for="f in b.fields.filter(x => x.key === 'model_3d')" :key="'3d'" class="mdc-3d">3D</span>
+                  </div>
+                  <div v-for="(f, fi) in b.fields.filter(x => !['id','category','heal_target','model_3d'].includes(x.key))"
+                       :key="fi" class="mdc-field" :class="{ list: f.items }">
+                    <span class="mdc-key">{{ fieldLabel(f.key) }}</span>
+                    <span v-if="f.items" class="mdc-chips">
+                      <span v-for="(it, ii) in f.items" :key="ii" class="mdc-chip">{{ it }}</span>
+                      <span v-if="!f.items.length" class="mdc-empty">（空列表）</span>
+                    </span>
+                    <span v-else class="mdc-val">{{ f.val }}</span>
+                  </div>
+                </template>
+                <div v-else class="mdc-raw">
+                  <span class="mdc-raw-line">{{ b.line }}</span>
+                  <span class="mdc-raw-badge">第 {{ b.lineNo }} 行</span>
+                </div>
+              </div>
+              <p v-if="!previewBlocks.length" class="mdc-empty-all">左侧输入 Markdown，右侧实时渲染该角色卡</p>
+            </div>
           </div>
         </div>
+
+        <div class="pe-sys">
+          <button class="sys-toggle" @click="showSys = !showSys">
+            {{ showSys ? '▾ 收起' : '▸ 预览' }}最终系统提示词（注入大模型的完整文本）
+          </button>
+          <pre v-if="showSys" class="sys-body">{{ sysPrompt }}</pre>
+        </div>
+        <p class="md-format-tip">
+          单角色编辑：本页只编辑当前角色的一个块。『## 角色名』为标题；『- 字段: 值』单值；行尾无值 + 缩进『  - 项』为列表。
+          id / category / work / heal_target 为技术字段不可修改；保存时逐行校验，自动备份并热生效。
+        </p>
       </div>
       <div v-else class="a-empty" style="padding:40px">← 从左侧选择一个角色开始编辑</div>
     </div>
 
-    <!-- ============ Tab 2: Markdown 源文件 ============ -->
-    <div v-show="tab === 'source'" class="card-lite p-src">
-      <div class="ps-head">
-        <div>
-          <b>prompts/personas.md</b>
-          <span class="ps-path">{{ file.path }}</span>
-        </div>
-        <div class="ps-actions">
-          <button v-if="!srcEditing" class="a-btn ghost" @click="srcEditing = true">编辑全文</button>
-          <template v-else>
-            <button class="a-btn ghost" @click="cancelSource">放弃修改</button>
-            <button class="a-btn" :disabled="saving" @click="saveSource">{{ saving ? '校验保存中…' : '校验并保存' }}</button>
-          </template>
-        </div>
-      </div>
-      <p class="ps-tip">格式：『## 角色名』开启角色；『- 字段: 值』单值；行尾无值 + 缩进『  - 项』为列表。保存时会校验全部 30 个角色，任何格式错误都会被拒绝（不会写坏文件），成功后立即热生效并自动备份当前版本。</p>
-      <textarea v-model="srcText" class="ps-editor" :readonly="!srcEditing" spellcheck="false"></textarea>
-      <p v-if="srcError" class="f-err">{{ srcError }}</p>
-    </div>
-
-    <!-- ============ Tab 3: 安全守则（只读） ============ -->
+    <!-- ============ Tab 2: 安全守则（只读） ============ -->
     <div v-show="tab === 'guards'" class="p-guards">
       <div class="card-lite">
         <div class="pg-hd">
@@ -132,7 +135,7 @@
       </p>
     </div>
 
-    <!-- ============ Tab 4: 历史版本 ============ -->
+    <!-- ============ Tab 3: 历史版本 ============ -->
     <div v-show="tab === 'backups'" class="card-lite">
       <div class="a-card-hd">
         <h3>历史版本 <span class="sub">每次保存自动备份，滚动保留 50 份；恢复前会先备份当前版本</span></h3>
@@ -153,12 +156,11 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../../api'
 
 const tabs = [
   { id: 'personas', label: '📋 角色提示词' },
-  { id: 'source', label: '📄 Markdown 源文件' },
   { id: 'guards', label: '🔒 安全守则' },
   { id: 'backups', label: '🕘 历史版本' },
 ]
@@ -172,22 +174,110 @@ const guards = ref({ global: '', heal: '' })
 const backups = ref([])
 const personaIndex = ref([])
 
+/* ===== 单角色编辑器状态 ===== */
 const current = ref(null)
-const formError = ref('')
-const form = reactive({
-  name: '', emoji: '', tag: '', desc: '', color: '',
-  personality: '', speech: '', cares: '', catchphraseStr: '',
-  voicePosStr: '', voiceNegStr: '', voiceNeuStr: '',
+const personaMd = ref('')
+const personaDraft = ref('')
+const personaError = ref('')
+const sysPrompt = ref('')
+const showSys = ref(false)
+const mdEditorRef = ref(null)
+
+/* ===== 实时渲染（单角色 Markdown → 角色卡片） ===== */
+const previewBlocks = ref([])
+const unknownLines = ref(0)
+const titleName = ref('')
+const titleEmoji = ref('🎭')
+let renderTimer = null
+
+const FIELD_LABELS = {
+  name: '名称', emoji: 'Emoji', work: '来源', tag: '标签', desc: '简介', color: '主题色',
+  personality: '性格', speech: '说话风格', cares: '在意的事',
+  catchphrases: '口头禅', 'voice.pos': '正向语料', 'voice.neg': '负向语料', 'voice.neu': '中性语料',
+}
+function fieldLabel(key) {
+  return FIELD_LABELS[key] || key
+}
+
+function formatErr(e, fallback) {
+  const d = e.response?.data || {}
+  const base = d.detail || fallback
+  return d.error_type ? `${base}（${d.error_type}${d.request_id ? ' · ' + d.request_id : ''}）` : base
+}
+
+function renderMarkdown(text) {
+  const blocks = []
+  const lines = text.split('\n')
+  let inComment = false
+  let cur = null
+  let pendingField = null
+  let unknown = 0
+  let firstTitle = ''
+  let firstEmoji = ''
+
+  lines.forEach((line, idx) => {
+    const s = line.trim()
+    const lineNo = idx + 1
+    if (inComment) {
+      if (s.includes('-->')) inComment = false
+      return
+    }
+    if (s.startsWith('<!--')) {
+      if (!s.includes('-->')) inComment = true
+      return
+    }
+    if (!s) return
+    if (line.startsWith('## ')) {
+      cur = { type: 'card', title: line.slice(3).trim(), fields: [] }
+      blocks.push(cur)
+      pendingField = null
+      if (!firstTitle) firstTitle = cur.title
+      return
+    }
+    if (!cur) {
+      blocks.push({ type: 'raw', line: s, lineNo })
+      unknown += 1
+      return
+    }
+    if (/^\s{2,}- /.test(line) && pendingField) {
+      pendingField.items.push(line.replace(/^\s+- /, '').trim())
+      return
+    }
+    if (line.startsWith('- ')) {
+      const body = line.slice(2)
+      const i = body.indexOf(':')
+      if (i < 0) {
+        blocks.push({ type: 'raw', line: s, lineNo })
+        unknown += 1
+        return
+      }
+      const key = body.slice(0, i).trim()
+      const val = body.slice(i + 1).trim()
+      pendingField = null
+      if (key === 'emoji' && val && !firstEmoji) firstEmoji = val
+      if (val === '') {
+        const f = { key, items: [] }
+        cur.fields.push(f)
+        pendingField = f
+      } else {
+        cur.fields.push({ key, val })
+      }
+      return
+    }
+    blocks.push({ type: 'raw', line: s, lineNo })
+    unknown += 1
+  })
+
+  previewBlocks.value = blocks
+  unknownLines.value = unknown
+  titleName.value = firstTitle
+  titleEmoji.value = firstEmoji || '🎭'
+}
+
+watch(personaMd, (v) => {
+  clearTimeout(renderTimer)
+  renderTimer = setTimeout(() => renderMarkdown(v), 250)
 })
-
-const previewText = ref('')
-const previewLoading = ref(false)
-let previewTimer = null
-
-const srcText = ref('')
-const srcEditing = ref(false)
-const srcError = ref('')
-const srcDraft = ref('')
 
 const groupedPersonas = computed(() => {
   const kw = search.value.trim().toLowerCase()
@@ -209,13 +299,6 @@ function timeText(iso) {
   return d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
-function splitLines(s) {
-  return (s || '').split('\n').map((x) => x.trim()).filter(Boolean)
-}
-function joinLines(arr) {
-  return (arr || []).join('\n')
-}
-
 async function load() {
   loading.value = true
   try {
@@ -224,114 +307,51 @@ async function load() {
     guards.value = data.guards
     backups.value = data.backups || []
     personaIndex.value = data.personas || []
-    const { data: src } = await api.get('/admin/prompts/source')
-    srcText.value = src.text
-    srcDraft.value = src.text
   } catch (e) { /* 忽略 */ } finally {
     loading.value = false
   }
 }
 
-function switchTab(t) {
-  tab.value = t
-  if (t === 'source' && srcEditing.value) {
-    // 保留草稿
-  }
-}
-
-function openPersona(pid) {
-  api.get(`/admin/prompts/persona/${pid}`).then(({ data }) => {
+async function openPersona(pid) {
+  personaError.value = ''
+  try {
+    const { data } = await api.get(`/admin/prompts/persona/${pid}/markdown`)
     current.value = data
-    formError.value = ''
-    form.name = data.persona.name
-    form.emoji = data.persona.emoji || ''
-    form.tag = data.persona.tag || ''
-    form.desc = data.persona.desc || ''
-    form.color = data.persona.color || ''
-    form.personality = data.persona.personality || ''
-    form.speech = data.persona.speech || ''
-    form.cares = data.persona.cares || ''
-    form.catchphraseStr = (data.persona.catchphrases || []).join('、')
-    form.voicePosStr = joinLines(data.persona.voice?.pos)
-    form.voiceNegStr = joinLines(data.persona.voice?.neg)
-    form.voiceNeuStr = joinLines(data.persona.voice?.neu)
-    refreshPreview()
-  })
-}
-
-function buildPatch() {
-  return {
-    name: form.name, emoji: form.emoji, tag: form.tag, desc: form.desc, color: form.color,
-    personality: form.personality, speech: form.speech, cares: form.cares,
-    catchphrases: form.catchphraseStr.split('、').map((s) => s.trim()).filter(Boolean),
-    voice: { pos: splitLines(form.voicePosStr), neg: splitLines(form.voiceNegStr), neu: splitLines(form.voiceNeuStr) },
+    personaMd.value = data.markdown
+    personaDraft.value = data.markdown
+    sysPrompt.value = data.system_prompt || ''
+    renderMarkdown(data.markdown)
+  } catch (e) {
+    personaError.value = formatErr(e, '加载角色失败')
   }
 }
 
-function refreshPreview() {
-  if (!current.value) return
-  clearTimeout(previewTimer)
-  previewTimer = setTimeout(async () => {
-    previewLoading.value = true
-    try {
-      const { data } = await api.post('/admin/prompts/preview', {
-        persona_id: current.value.readonly.id, patch: buildPatch(),
-      })
-      previewText.value = data.system_prompt
-    } catch (e) {
-      previewText.value = '⚠ ' + (e.response?.data?.detail || '预览失败')
-    } finally {
-      previewLoading.value = false
-    }
-  }, 600)
-}
-
-watch(form, refreshPreview, { deep: true })
-
-function resetForm() {
-  if (current.value) openPersona(current.value.readonly.id)
+function resetPersona() {
+  personaMd.value = personaDraft.value
+  personaError.value = ''
+  renderMarkdown(personaMd.value)
 }
 
 async function savePersona() {
   if (!current.value) return
-  formError.value = ''
+  personaError.value = ''
   saving.value = true
   try {
     const pid = current.value.readonly.id
-    const { data } = await api.put(`/admin/prompts/persona/${pid}`, buildPatch())
-    previewText.value = data.system_prompt
+    const { data } = await api.put(`/admin/prompts/persona/${pid}/markdown`,
+                                    { markdown: personaMd.value })
+    personaDraft.value = personaMd.value
+    sysPrompt.value = data.system_prompt || sysPrompt.value
+    // 同步左侧列表的显示名/emoji（名称可能在 Markdown 里被改）
     const idx = personaIndex.value.findIndex((p) => p.id === pid)
     if (idx >= 0) {
-      personaIndex.value[idx].name = form.name
-      personaIndex.value[idx].emoji = form.emoji
-      personaIndex.value[idx].tag = form.tag
+      personaIndex.value[idx].name = titleName.value || personaIndex.value[idx].name
+      personaIndex.value[idx].emoji = titleEmoji.value || personaIndex.value[idx].emoji
     }
     alert(`已保存并热生效（备份：${data.backup || '无'}）`)
     await load()
-    openPersona(pid)
   } catch (e) {
-    formError.value = e.response?.data?.detail || '保存失败'
-  } finally {
-    saving.value = false
-  }
-}
-
-function cancelSource() {
-  srcEditing.value = false
-  srcText.value = srcDraft.value
-  srcError.value = ''
-}
-
-async function saveSource() {
-  srcError.value = ''
-  saving.value = true
-  try {
-    const { data } = await api.put('/admin/prompts/source', { text: srcText.value })
-    alert(`校验通过并保存（${data.personas} 个角色，备份：${data.backup || '无'}）`)
-    srcEditing.value = false
-    await load()
-  } catch (e) {
-    srcError.value = e.response?.data?.detail || '保存失败'
+    personaError.value = formatErr(e, '保存失败')
   } finally {
     saving.value = false
   }
@@ -367,7 +387,7 @@ onMounted(load)
 .card-lite { background: #fff; border: 1px solid #efeaf8; border-radius: 16px; padding: 16px; }
 
 /* 角色侧栏 */
-.p-side { width: 242px; flex: none; max-height: 78vh; overflow-y: auto; position: sticky; top: 76px; }
+.p-side { width: 242px; flex: none; max-height: 80vh; overflow-y: auto; position: sticky; top: 76px; }
 .p-search { width: 100%; border: 1px solid #e6dff5; border-radius: 9px; padding: 8px 12px; font-size: 13px; outline: none; margin-bottom: 10px; }
 .p-search:focus { border-color: #7c6fd0; }
 .p-cat { font-size: 11px; color: #9a94ab; padding: 10px 6px 4px; letter-spacing: .5px; }
@@ -378,53 +398,65 @@ onMounted(load)
 .p-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .p-heal { flex: none; font-size: 10px; color: #2f9e6b; background: #e9f8ef; padding: 1px 6px; border-radius: 8px; }
 
-/* 编辑器 */
+/* 单角色编辑器 */
 .p-editor { flex: 1; min-width: 0; }
-.pe-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; gap: 12px; flex-wrap: wrap; }
-.pe-title { display: flex; align-items: center; gap: 8px; }
+.pe-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; gap: 12px; flex-wrap: wrap; }
+.pe-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pe-title b { font-size: 16px; color: #33284f; }
 .pe-emoji { font-size: 20px; }
-.pe-id { font-size: 11.5px; color: #9a94ab; font-family: Consolas, monospace; }
-.pe-actions { display: flex; gap: 8px; }
-.pe-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 18px; }
-@media (max-width: 1100px) { .pe-grid { grid-template-columns: 1fr; } }
+.pe-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.save-state { font-size: 11.5px; color: #2f9e6b; background: #e9f8ef; padding: 3px 10px; border-radius: 10px; }
+.save-state.warn { color: #d68a2e; background: #fff4e8; }
+.md-error { color: #d9536b; font-size: 12.5px; background: #fdeef0; border: 1px solid #f4ccd4; border-radius: 10px; padding: 9px 14px; margin: 0 0 10px; white-space: pre-wrap; }
 
-.pe-form .f-row2 { display: grid; grid-template-columns: 64px 1fr 64px 1fr; gap: 8px; align-items: center; margin-bottom: 9px; }
-.pe-form .f-row1 label { display: block; font-size: 12px; color: #6f6885; margin: 8px 0 4px; font-weight: 600; }
-.pe-form .hint { font-weight: 400; color: #b9b3c9; margin-left: 6px; }
-.pe-form input, .pe-form textarea {
-  border: 1px solid #e6dff5; border-radius: 9px; padding: 8px 11px; font-size: 13px; outline: none; width: 100%;
-  font-family: inherit; resize: vertical;
+.pe-md-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-height: 54vh; }
+@media (max-width: 1100px) { .pe-md-split { grid-template-columns: 1fr; } }
+.md-edit-pane, .md-preview-pane { display: flex; flex-direction: column; border: 1px solid #efeaf8; border-radius: 12px; overflow: hidden; min-height: 320px; }
+.pane-hd {
+  flex: none; display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 13px; font-size: 12px; color: #6f6885; font-weight: 600;
+  background: #faf8fe; border-bottom: 1px solid #f1ecfa;
 }
-.pe-form input:focus, .pe-form textarea:focus { border-color: #7c6fd0; }
-.v-cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-.v-cols b { display: block; font-size: 11px; color: #9a94ab; margin-bottom: 4px; font-weight: 600; }
-.f-err { color: #d9536b; font-size: 12.5px; margin-top: 10px; }
+.pane-hd .pane-ok { color: #2f9e6b; font-weight: 500; font-size: 11px; }
+.pane-hd .pane-warn { color: #d68a2e; font-weight: 500; font-size: 11px; }
+.md-editor {
+  flex: 1; width: 100%; min-height: 52vh; border: none; outline: none; resize: none;
+  padding: 13px 15px; font-family: 'Cascadia Code', Consolas, monospace; font-size: 12.5px;
+  line-height: 1.72; background: #fdfcff; color: #3a3545; white-space: pre; overflow: auto; tab-size: 2;
+}
+.md-editor:focus { background: #fffdfd; }
+.md-preview { flex: 1; overflow-y: auto; padding: 12px; background: #fbf9fe; max-height: 62vh; min-height: 46vh; }
 
-.pe-preview { position: sticky; top: 76px; align-self: start; }
-.pp-hd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-.pp-hd b { font-size: 13px; color: #33284f; }
-.pp-hd span { font-size: 11px; color: #b9b3c9; }
-.pp-hd span.saving { color: #7c6fd0; }
-.pp-body {
-  background: #241f38; color: #d8d2ec; border-radius: 12px; padding: 16px; font-size: 12px;
-  line-height: 1.8; white-space: pre-wrap; word-break: break-word; max-height: 66vh; overflow-y: auto;
-  font-family: 'Cascadia Code', Consolas, monospace;
-}
+/* 渲染后的角色卡片 */
+.mdc-card { background: #fff; border: 1px solid #eee9f7; border-radius: 12px; padding: 13px 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(80, 60, 140, .04); }
+.mdc-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-bottom: 9px; margin-bottom: 9px; border-bottom: 1px solid #f4f0fb; }
+.mdc-name { font-size: 15px; font-weight: 700; color: #33284f; }
+.mdc-id { font-family: Consolas, monospace; font-size: 10.5px; color: #5f54a3; background: #f0ecff; padding: 2px 8px; border-radius: 8px; }
+.mdc-cat { font-size: 10.5px; color: #7c6fd0; background: #f0ecff; padding: 2px 8px; border-radius: 8px; }
+.mdc-heal { font-size: 10.5px; color: #2f9e6b; background: #e9f8ef; padding: 2px 8px; border-radius: 8px; }
+.mdc-3d { font-size: 10.5px; color: #2a7fa8; background: #e8f4fb; padding: 2px 8px; border-radius: 8px; }
+.mdc-field { display: flex; gap: 10px; align-items: flex-start; padding: 3.5px 0; font-size: 12.5px; line-height: 1.75; }
+.mdc-key { flex: none; width: 76px; color: #9a94ab; font-size: 11.5px; padding-top: 1px; }
+.mdc-val { color: #4a4360; flex: 1; min-width: 0; word-break: break-word; }
+.mdc-field.list .mdc-key { padding-top: 4px; }
+.mdc-chips { display: flex; flex-wrap: wrap; gap: 6px; flex: 1; }
+.mdc-chip { font-size: 11.5px; color: #4a4360; background: #f6f2fc; border: 1px solid #ebe3f8; padding: 2px 9px; border-radius: 10px; line-height: 1.6; }
+.mdc-empty { font-size: 11px; color: #c0bbd0; }
+.mdc-raw { display: flex; align-items: baseline; gap: 8px; padding: 6px 4px; font-size: 12px; color: #9a7b52; }
+.mdc-raw-line { font-family: Consolas, monospace; color: #b26a1d; }
+.mdc-raw-badge { flex: none; font-size: 10px; color: #d68a2e; background: #fff4e8; padding: 1px 7px; border-radius: 8px; }
+.mdc-empty-all { text-align: center; color: #b9b3c9; font-size: 12.5px; padding: 60px 0; }
+.md-format-tip { font-size: 11.5px; color: #9a94ab; line-height: 1.7; margin: 10px 0 0; }
 
-/* 源文件 */
-.p-src .ps-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 12px; flex-wrap: wrap; }
-.ps-head b { font-size: 14px; color: #33284f; }
-.ps-path { display: block; font-size: 11px; color: #9a94ab; font-family: Consolas, monospace; margin-top: 2px; }
-.ps-actions { display: flex; gap: 8px; }
-.ps-tip { font-size: 12px; color: #8b869b; line-height: 1.7; margin: 6px 0 12px; }
-.ps-editor {
-  width: 100%; min-height: 58vh; border: 1px solid #e6dff5; border-radius: 12px; padding: 14px 16px;
-  font-family: 'Cascadia Code', Consolas, monospace; font-size: 12.5px; line-height: 1.75; outline: none;
-  background: #fdfcff; resize: vertical; white-space: pre; overflow-wrap: normal; overflow-x: auto;
+/* 系统提示词折叠面板 */
+.pe-sys { margin-top: 12px; }
+.sys-toggle { border: none; background: transparent; color: #6f63b8; font-size: 12.5px; cursor: pointer; padding: 4px 0; }
+.sys-toggle:hover { color: #5f54a3; }
+.sys-body {
+  margin: 6px 0 0; background: #241f38; color: #d8d2ec; border-radius: 12px; padding: 14px 16px;
+  font-size: 12px; line-height: 1.8; white-space: pre-wrap; word-break: break-word;
+  max-height: 40vh; overflow-y: auto; font-family: 'Cascadia Code', Consolas, monospace;
 }
-.ps-editor:focus { border-color: #7c6fd0; }
-.ps-editor[readonly] { background: #f8f5fd; color: #6f6885; }
 
 /* 守则 */
 .p-guards { display: flex; flex-direction: column; gap: 16px; }

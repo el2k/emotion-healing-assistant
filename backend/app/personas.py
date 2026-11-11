@@ -579,32 +579,57 @@ def parse_markdown(text: str) -> list[dict]:
     return items
 
 
+def _as_text(v) -> str:
+    """字段值类型容错：字符串原样；列表（误写成缩进子项）合并为一行；None → 空。"""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, (list, tuple)):
+        return " ".join(str(x).strip() for x in v if str(x).strip())
+    return str(v)
+
+
+def _as_list(v) -> list[str]:
+    """列表字段容错：字符串（误写成单值）→ 单条；列表 → 逐项清洗。"""
+    if v is None:
+        return []
+    if isinstance(v, str):
+        return [v.strip()] if v.strip() else []
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [str(v).strip()]
+
+
 def _normalize(raw: dict) -> dict:
-    """原始解析结果 → 规范角色卡（校验必填项）。"""
-    pid = (raw.get("id") or "").strip()
+    """原始解析结果 → 规范角色卡（校验必填项；对误写的值做类型容错）。"""
+    pid = _as_text(raw.get("id")).strip()
     if not re.fullmatch(r"[a-z0-9_]{1,32}", pid):
-        raise ValueError(f"角色「{raw.get('name') or '?'}」的 id 非法：{pid!r}（仅小写字母/数字/下划线）")
-    for k in ("name", "category", "personality", "speech", "cares", "desc"):
-        if not (raw.get(k) or "").strip():
-            raise ValueError(f"角色「{raw.get('name') or pid}」缺少必填字段 {k}")
-    if not raw.get("catchphrases"):
-        raise ValueError(f"角色「{raw['name']}」至少需要一条口头禅 catchphrases")
-    voice = {k: [x for x in (raw.get(f"voice.{k}") or []) if x]
-             for k in ("pos", "neg", "neu")}
+        raise ValueError(f"角色「{_as_text(raw.get('name')) or '?'}」的 id 非法：{pid!r}（仅小写字母/数字/下划线）")
+    texts = {k: _as_text(raw.get(k)).strip() for k in
+             ("name", "category", "personality", "speech", "cares", "desc")}
+    for k, v in texts.items():
+        if not v:
+            raise ValueError(f"角色「{texts['name'] or pid}」缺少必填字段 {k}（应写成「- {k}: 内容」）")
+    catchphrases = _as_list(raw.get("catchphrases"))
+    if not catchphrases:
+        raise ValueError(f"角色「{texts['name']}」至少需要一条口头禅 catchphrases")
+    voice = {k: _as_list(raw.get(f"voice.{k}")) for k in ("pos", "neg", "neu")}
     if not any(voice.values()):
-        raise ValueError(f"角色「{raw['name']}」至少需要一条 voice 兜底语料")
+        raise ValueError(f"角色「{texts['name']}」至少需要一条 voice 兜底语料")
     p = {
-        "id": pid, "name": raw["name"].strip(),
-        "emoji": raw.get("emoji", ""), "work": raw.get("work", ""),
-        "category": raw["category"].strip(), "tag": raw.get("tag", ""),
-        "desc": raw["desc"].strip(), "color": raw.get("color", ""),
-        "personality": raw["personality"].strip(), "speech": raw["speech"].strip(),
-        "cares": raw["cares"].strip(),
-        "catchphrases": [c for c in raw["catchphrases"] if c],
+        "id": pid, "name": texts["name"],
+        "emoji": _as_text(raw.get("emoji")), "work": _as_text(raw.get("work")),
+        "category": texts["category"], "tag": _as_text(raw.get("tag")),
+        "desc": texts["desc"], "color": _as_text(raw.get("color")),
+        "personality": texts["personality"], "speech": texts["speech"],
+        "cares": texts["cares"],
+        "catchphrases": catchphrases,
         "voice": voice,
     }
-    if (raw.get("heal_target") or "").strip():
-        p["heal_target"] = raw["heal_target"].strip()
+    heal_target = _as_text(raw.get("heal_target")).strip()
+    if heal_target:
+        p["heal_target"] = heal_target
     if str(raw.get("model_3d", "")).strip().lower() in ("true", "1", "yes"):
         p["model_3d"] = True
     return p
@@ -713,6 +738,62 @@ def _apply_patch(p: dict, patch: dict) -> dict:
     if not any(q["voice"].values()):
         raise ValueError("至少保留一条 voice 兜底语料（LLM 故障时的角色降级语料）")
     return q
+
+
+def dump_persona_markdown(p: dict) -> str:
+    """单个角色卡 → Markdown 源码块（供管理后台单角色编辑器）。"""
+    lines = [f"## {p['name']}", "", f"- id: {p['id']}"]
+    for f in ("emoji", "work", "category", "tag", "desc", "color",
+              "personality", "speech", "cares"):
+        lines.append(f"- {f}: {p.get(f, '')}")
+    if p.get("heal_target"):
+        lines.append(f"- heal_target: {p['heal_target']}")
+    if p.get("model_3d"):
+        lines.append("- model_3d: true")
+    for f in _LIST_FIELDS:
+        lines.append(f"- {f}:")
+        for it in _get_list(p, f):
+            lines.append(f"  - {it}")
+    return "\n".join(lines) + "\n"
+
+
+def get_persona_markdown(pid: str) -> dict:
+    """读取单个角色的 Markdown 源码块 + 技术字段（只读）+ 完整系统提示词。"""
+    p = _BY_ID.get(pid)
+    if not p:
+        raise KeyError(pid)
+    return {
+        "markdown": dump_persona_markdown(p),
+        "readonly": {"id": p["id"], "category": p["category"], "work": p["work"],
+                     "heal_target": p.get("heal_target", ""),
+                     "model_3d": bool(p.get("model_3d"))},
+        "system_prompt": _compose(p),
+    }
+
+
+def update_persona_markdown(pid: str, text: str) -> dict:
+    """按单角色 Markdown 保存：解析→校验（id/技术字段不可变）→备份→写盘→热重载。"""
+    raw_items = parse_markdown(text)
+    if len(raw_items) != 1:
+        raise ValueError("单角色编辑器只应包含一个角色块（以「## 角色名」开头）")
+    new_p = _normalize(raw_items[0])
+    old = _BY_ID.get(pid)
+    if not old:
+        raise KeyError(pid)
+    if new_p["id"] != pid:
+        raise ValueError(f"id 不可修改（当前为 {pid}，提交的是 {new_p['id']}）")
+    for k in ("category", "work", "heal_target", "model_3d"):
+        if new_p.get(k) != old.get(k):
+            raise ValueError(f"技术字段 {k} 不可修改（如需调整请编辑 personas.md 全文件）")
+    with _LOCK:
+        items = deepcopy(list(PERSONAS))
+        idx = next(i for i, q in enumerate(items) if q["id"] == pid)
+        items[idx] = new_p
+        _validate_items(items, set(_BY_ID))
+        backup = _backup_current()
+        _write_file_atomic(dump_markdown(items))
+        _reload(items)
+        return {"backup": backup, "updated": pid}
 
 
 def update_persona(pid: str, patch: dict) -> dict:

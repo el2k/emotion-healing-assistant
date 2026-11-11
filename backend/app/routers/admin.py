@@ -1084,6 +1084,31 @@ def prompts_source_save(data: PromptSourceIn):
         raise HTTPException(400, f"保存被拒绝：{e}")
 
 
+@router.get("/prompts/persona/{pid}/markdown")
+def persona_markdown(pid: str):
+    """单个角色的 Markdown 源码块（供「左编辑 / 右实时渲染」的单角色编辑器）。"""
+    try:
+        return personas.get_persona_markdown(pid)
+    except KeyError:
+        raise HTTPException(404, "角色不存在")
+
+
+class PersonaMarkdownIn(BaseModel):
+    markdown: str = Field(..., min_length=10)
+
+
+@router.put("/prompts/persona/{pid}/markdown")
+def persona_markdown_save(pid: str, data: PersonaMarkdownIn):
+    """保存单个角色的 Markdown 块：校验 → 备份 → 写盘 → 热重载（id/技术字段不可变）。"""
+    try:
+        r = personas.update_persona_markdown(pid, data.markdown)
+        return {**r, "system_prompt": personas.system_prompt(pid)}
+    except KeyError:
+        raise HTTPException(404, "角色不存在")
+    except ValueError as e:
+        raise HTTPException(400, f"保存被拒绝：{e}")
+
+
 @router.get("/prompts/persona/{pid}")
 def persona_prompt(pid: str):
     """单个角色的可编辑字段 + 组装后的完整系统提示词。"""

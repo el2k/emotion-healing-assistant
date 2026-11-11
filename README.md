@@ -33,12 +33,11 @@
   - **注入角色提示词**：按 7 大分类（基本情况/学业职业/重要他人/喜好偏好/目标计划/健康情况/情绪背景）分组限量注入，并带「自然引用、冲突以当下为准」的使用约束
   - 数据模型：`user_wiki_entries` 表（category/key/value/evidence/source/confidence/pinned/hits），接口 `GET/POST /api/profile/me/wiki`、`DELETE /api/profile/me/wiki/{id}`
 - **多智能体角色**：30 位角色，按 **分类**（治愈陪伴 / 趣味互动 / 3D 陪伴 / 心理疗愈室 / 动漫角色 / 游戏角色）组织，支持**分类下拉筛选 + 搜索**，并有 **🔥 热门角色榜**（按使用量排序）。每位角色配 **原创同人立绘**（AI 绘制，贴合发色/瞳色/服饰气质，非版权方官方素材），角色广场与聊天页均以立绘形象展示。每个角色含**结构化人设卡**（性格/说话风格/口头禅/在意的事）驱动大模型真实扮演，同时内置**角色专属回复语料**——即使不接大模型也按角色性格说话，而非通用话术套壳。动漫游戏角色为**同人演绎**（原创人设、不复制官方台词），全部健康向；人设卡**外置于 `backend/prompts/personas.md`**（数据与代码分离），可在管理后台「提示词管理」页**在线编辑并热生效**（详见下方「角色提示词在线管理」）
-- **角色提示词在线管理**（管理后台 `/admin/prompts`，四页签）：
-  - **角色提示词**：左侧 30 位角色分类列表 + 右侧表单编辑（显示名/Emoji/标签/主题色/简介/性格/说话风格/口头禅/在意的事/voice 兜底语料），右侧**实时预览组装后的完整系统提示词**（含安全底线与疗愈室守则），保存即**热生效**（无需重启）
-  - **Markdown 源文件**：可直接编辑 `prompts/personas.md` 全文，保存时**逐行校验**（任何格式错误拒绝写入，不会写坏文件），成功后规范化重写并热重载
+- **角色提示词在线管理**（管理后台 `/admin/prompts`，三页签）：
+  - **角色提示词（默认页签）**：左侧 30 位角色分类列表；点开任一角色 → **单角色 Markdown 编辑**：左侧编辑该角色源码（仅一个 `## 角色名` 块，不是全部角色混在一起），右侧**实时渲染该角色卡**（250ms 防抖：角色名 + id/分类/疗愈方向徽章 + 字段名内容 + 口头禅/语料 chips）；**逐行格式校验实时标注**（异常行标红并提示会拒绝保存）；可展开「最终系统提示词」面板预览注入大模型的完整文本（含安全底线与疗愈室守则）；保存即**校验→备份→写盘→热重载**（无需重启）
   - **安全守则（只读）**：全局底线（12356 危机引导）与疗愈室专业守则仅展示不开放编辑，防止误改导致危机处置失效
   - **历史版本**：每次修改前**自动备份**（滚动保留 50 份），一键恢复任意版本；恢复前也会先备份当前
-  - 技术字段保护：`id/category/work/heal_target` 不可改、不可删除现有角色（防历史会话悬空）；文件损坏时自动回退内置默认，服务永不中断
+  - 技术字段保护：单角色编辑中 `id/category/work/heal_target` 不可修改、不可删除现有角色（防历史会话悬空）；文件损坏时自动回退内置默认，服务永不中断
 - **角色×情绪联动**：与任意角色的聊天都会写入同一份情绪档案，情绪档案页展示「角色陪伴」榜，做到角色陪伴与情绪记录相互联通
 - **3D 陪伴角色**：元气少女「柚子」在 `/vrm` 页与你聊天互动——采用 **three-vrm 加载 GitHub 开源 VRM 模型**（pixiv/three-vrm 官方示例模型，人形骨骼 + 表情系统，加载失败自动降级为 Three.js 程序化建模兑底），12 套情绪反应动作、眨眼、眼神跟随、拖动旋转、点击互动、TTS 朗读同步口型；详见下方「3D 陪伴角色」章节
 - **正能量社区（小红书风格）**：**图文混排块编辑器**（文字/图片/视频块自由穿插、可排序、实时预览），支持短视频、标签、点赞、评论、搜索，瀑布流卡片流；块模型参考 BlockNote / Tiptap 等 Notion 风格开源编辑器
@@ -178,6 +177,41 @@ npm run dev                              # http://localhost:5173（已代理 /ap
 
 > 生产环境请务必通过 `.env` 修改 `ADMIN_PASSWORD` 与 `JWT_SECRET`。
 
+## 命令行聊天（终端里与角色卡对话）
+
+无需打开浏览器，在终端直接和任意角色聊天（流式逐字输出 + 情绪识别显示）。
+
+### 最简单：双击 `chat.bat`（Windows）
+
+项目根目录的 **`chat.bat`** 双击即可：自动检查 Docker Desktop 与容器状态（未运行会自动启动）→ 列出全部角色 → 输入角色名/ID（直接回车 = 小窝）→ 进入聊天。
+聊天中输入消息回车发送；`/list` 看角色、`/persona 迷雾魅魔` 换角色、`/exit` 退出。
+
+> 前提：电脑已安装 Docker Desktop 并处于启动状态（任务栏小鲸鱼图标稳定）。
+
+### 命令行方式（手动）
+
+```bash
+# 列出全部角色（分类 / id / 标签）
+docker compose exec app python cli_chat.py --list
+
+# 与小窝聊天（交互式，多个身份都支持模糊匹配）
+docker compose exec app python cli_chat.py -p nuan
+docker compose exec app python cli_chat.py -p 迷雾魅魔
+docker compose exec app python cli_chat.py -p 林静之          # 疗愈室专家
+
+# 单轮模式（脚本化 / 管道测试）
+docker compose exec app python cli_chat.py -p succubus --once "今天好累，想找人说说话"
+
+# 临时指定模型
+docker compose exec app python cli_chat.py -p nuan --model qwen-flash
+```
+
+宿主机也可以直接跑（需已安装依赖）：`cd backend && .venv\Scripts\python cli_chat.py -p nuan`
+
+交互命令：`/list` 列角色 · `/persona <关键字>` 切换角色（自动新建会话）· `/new` 新会话 · `/help` 帮助 · `/exit` 退出
+
+常用参数：`--phone/--password`（默认演示账号 13900000000）、`--base-url`、`--no-stream`（关闭流式）、`--no-color`（适合重定向到日志）
+
 ## 配置大模型（可选，强烈推荐）
 
 编辑 `backend/.env`（参照 `.env.example`）：
@@ -241,6 +275,8 @@ python -m tests.test_api         # 端到端 API 测试
 | GET  | /api/admin/prompts/overview | 提示词总览：源文件信息 + 只读守则 + 备份列表 + 角色索引 |
 | GET  | /api/admin/prompts/source | 提示词 Markdown 源文件全文 |
 | PUT  | /api/admin/prompts/source | Markdown 全文保存（逐行校验→备份→写盘→热重载） |
+| GET  | /api/admin/prompts/persona/{id}/markdown | 单角色 Markdown 源码块（左编辑右渲染的数据源） |
+| PUT  | /api/admin/prompts/persona/{id}/markdown | 保存单角色 Markdown 块（id/技术字段不可变） |
 | GET  | /api/admin/prompts/persona/{id} | 单角色可编辑字段 + 组装后完整系统提示词 |
 | PUT  | /api/admin/prompts/persona/{id} | 表单更新单角色（保存即热生效） |
 | POST | /api/admin/prompts/preview | 预览补丁应用后的系统提示词（不落盘） |

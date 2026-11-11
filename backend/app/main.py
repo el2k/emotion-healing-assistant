@@ -2,6 +2,7 @@
 """FastAPI 应用入口：注册路由、CORS、初始化管理员、托管前端静态文件。
 含请求指标中间件、断路器、深度健康检查与结构化错误响应。"""
 import os
+import sys
 import time
 import traceback
 from contextlib import asynccontextmanager
@@ -107,6 +108,9 @@ async def metrics_middleware(request: Request, call_next):
         latency_ms = (time.time() - start) * 1000
         error_detail = f"{type(exc).__name__}: {str(exc)[:200]}"
         metrics.record_request(request.url.path, request.method, 500, latency_ms, error_detail)
+        # 未处理异常的完整堆栈打到 stderr（docker compose logs 可见），便于定位 500
+        print(f"[ERROR] {request.method} {request.url.path} -> {error_detail}", file=sys.stderr)
+        traceback.print_exc()
         # 结构化错误：绝不把失败包装成 200
         return JSONResponse(
             status_code=500,

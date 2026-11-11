@@ -1051,6 +1051,56 @@ def test_prompt_management(client):
         assert client.get("/api/admin/prompts/source", headers=uh).status_code == 403
         assert client.get("/api/admin/prompts/overview").status_code == 401
 
+        # 7.1) 单角色 Markdown 编辑器（左编辑右实时渲染的数据接口）
+        r = client.get("/api/admin/prompts/persona/nuan/markdown", headers=ah)
+        assert r.status_code == 200, r.text
+        pm = r.json()
+        assert pm["markdown"].startswith("## 小窝") and "- id: nuan" in pm["markdown"]
+        assert pm["readonly"]["category"] == "治愈陪伴"
+        assert "【性格】" in pm["system_prompt"]
+        md = pm["markdown"]
+        edited = md.replace("- personality: 温柔、耐心、包容，善于倾听，从不评判",
+                            "- personality: 温柔（单角色编辑验证）")
+        r = client.put("/api/admin/prompts/persona/nuan/markdown", headers=ah,
+                       json={"markdown": edited})
+        assert r.status_code == 200, r.text
+        assert "单角色编辑验证" in P.system_prompt("nuan")
+        # id 不可改
+        r = client.put("/api/admin/prompts/persona/nuan/markdown", headers=ah,
+                       json={"markdown": edited.replace("- id: nuan", "- id: hacked")})
+        assert r.status_code == 400 and "id 不可修改" in r.json()["detail"]
+        # 技术字段不可改
+        r = client.put("/api/admin/prompts/persona/nuan/markdown", headers=ah,
+                       json={"markdown": edited.replace("- category: 治愈陪伴", "- category: 心理疗愈室")})
+        assert r.status_code == 400 and "不可修改" in r.json()["detail"]
+        # 多角色块拒绝
+        r = client.put("/api/admin/prompts/persona/nuan/markdown", headers=ah,
+                       json={"markdown": edited + "\n" + md.replace("nuan", "mama2")})
+        assert r.status_code == 400 and "一个角色块" in r.json()["detail"]
+        # 恢复原值
+        r = client.put("/api/admin/prompts/persona/nuan/markdown", headers=ah,
+                       json={"markdown": md})
+        assert r.status_code == 200 and "单角色编辑验证" not in P.system_prompt("nuan")
+        assert client.get("/api/admin/prompts/persona/none/markdown", headers=ah).status_code == 404
+
+        # 7.2) 字段写法容错（曾导致 500）：必填字段写成缩进子项 → 自动合并；
+        #      catchphrases 写成单值 → 单条（不按字符拆分）
+        tolerant = md.replace("- desc: 温柔、耐心，安静地接住你的每一份情绪。",
+                              "- desc:\n  - 温柔、耐心，\n  - 安静地接住你的每一份情绪。")
+        r = client.put("/api/admin/prompts/persona/nuan/markdown", headers=ah,
+                       json={"markdown": tolerant})
+        assert r.status_code == 200, r.text
+        assert "温柔、耐心， 安静地接住你的每一份情绪。" in P.get("nuan")["desc"]
+        tolerant2 = md.replace("- catchphrases:\n  - 我在呢\n  - 慢慢说",
+                               "- catchphrases: 我在呢、慢慢说")
+        r = client.put("/api/admin/prompts/persona/nuan/markdown", headers=ah,
+                       json={"markdown": tolerant2})
+        assert r.status_code == 200, r.text
+        assert P.get("nuan")["catchphrases"] == ["我在呢、慢慢说"]
+        r = client.put("/api/admin/prompts/persona/nuan/markdown", headers=ah,
+                       json={"markdown": md})
+        assert r.status_code == 200 and P.get("nuan")["desc"] == "温柔、耐心，安静地接住你的每一份情绪。"
+
         # 8) markdown round-trip：规范化往返一致
         text = P.get_prompt_source()["text"]
         items = [P._normalize(x) for x in P.parse_markdown(text)]

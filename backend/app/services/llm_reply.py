@@ -17,10 +17,13 @@ from ..observability import metrics, llm_breaker
 
 def _build_messages(emotion: dict, user_message: str, history: list[dict],
                     profile_text: str, intent: str, persona_id: str,
-                    strategy_text: str = "", length_text: str = "") -> list[dict]:
+                    strategy_text: str = "", length_text: str = "",
+                    knowledge_text: str = "") -> list[dict]:
     msgs = [{"role": "system", "content": personas.system_prompt(persona_id)}]
     if profile_text:
         msgs.append({"role": "system", "content": "【用户长期画像】" + profile_text})
+    if knowledge_text:
+        msgs.append({"role": "system", "content": knowledge_text})
     for h in history or []:
         if h.get("role") in ("user", "assistant") and h.get("content"):
             msgs.append({"role": h["role"], "content": h["content"]})
@@ -44,11 +47,14 @@ async def generate(emotion: dict, user_message: str = "",
                    recent_replies: list[str] | None = None,
                    strategy_text: str = "",
                    length_text: str = "",
-                   model: str | None = None) -> tuple[str, str, dict]:
+                   model: str | None = None,
+                   include_messages: bool = False,
+                   knowledge_text: str = "") -> tuple[str, str, dict]:
     """返回 (回复文本, 来源, 用量信息)。source 为 llm / template / template_degraded。
 
     用量信息：{"model": 实际模型, "usage": {prompt/completion/total_tokens}}，
-    非 LLM 来源时为空 dict。断路器 OPEN 时跳过 LLM 直接走降级，降级标记为 template_degraded。
+    非 LLM 来源时为空 dict。include_messages=True 时附 "messages"（发给 LLM 的
+    完整消息数组，仅供链路追踪展示；llm_usage.record 只读 token 字段，不会落库）。
     """
     # 断路器检查：OPEN 时不调用 LLM，直接降级
     if llm_breaker.can_call() and settings.LLM_ENABLED and settings.LLM_API_KEY:
@@ -56,12 +62,16 @@ async def generate(emotion: dict, user_message: str = "",
         start = time.time()
         reply, usage = await _call_llm(emotion, user_message, history, profile_text,
                                        intent, persona_id, strategy_text, length_text,
-                                       model=used_model)
+                                       model=used_model, knowledge_text=knowledge_text)
         latency = (time.time() - start) * 1000
         if reply:
             llm_breaker.record_success()
             metrics.record_llm("reply", latency, success=True)
-            return reply, "llm", {"model": used_model, "usage": usage or {}}
+            extra = {"messages": _build_messages(
+                emotion, user_message, history, profile_text,
+                intent, persona_id, strategy_text, length_text,
+                knowledge_text)} if include_messages else {}
+            return reply, "llm", {"model": used_model, "usage": usage or {}, **extra}
         # LLM 调用失败
         llm_breaker.record_failure("LLM returned empty")
         metrics.record_llm("reply", latency, success=False, fallback=True)
@@ -78,14 +88,16 @@ async def generate(emotion: dict, user_message: str = "",
 
 async def _call_llm(emotion, user_message, history, profile_text, intent,
                     persona_id, strategy_text="", length_text="",
-                    model: str | None = None) -> tuple[str | None, dict]:
+                    model: str | None = None,
+                    knowledge_text: str = "") -> tuple[str | None, dict]:
     """调用 LLM，返回 (内容, usage)。失败返回 (None, {})。"""
     url = f"{settings.LLM_BASE_URL.rstrip('/')}/chat/completions"
     headers = {"Authorization": f"Bearer {settings.LLM_API_KEY}"}
     payload = {
         "model": model or settings.LLM_MODEL,
         "messages": _build_messages(emotion, user_message, history, profile_text,
-                                    intent, persona_id, strategy_text, length_text),
+                                    intent, persona_id, strategy_text, length_text,
+                                    knowledge_text),
         "temperature": 0.75,
     }
     try:
@@ -111,7 +123,9 @@ async def generate_stream(emotion: dict, user_message: str = "",
                           recent_replies: list[str] | None = None,
                           strategy_text: str = "",
                           length_text: str = "",
-                          model: str | None = None):
+                          model: str | None = None,
+                          include_messages: bool = False,
+                          knowledge_text: str = ""):
     """流式生成回复。yield 事件 dict：
     {"type": "chunk", "content": "..."}   逐段文本
     {"type": "done", "content": "...", "source": "...", "model": "...", "usage": {...}}  完整回复+来源+用量
@@ -136,7 +150,8 @@ async def generate_stream(emotion: dict, user_message: str = "",
     payload = {
         "model": used_model,
         "messages": _build_messages(emotion, user_message, history, profile_text,
-                                    intent, persona_id, strategy_text, length_text),
+                                    intent, persona_id, strategy_text, length_text,
+                                    knowledge_text),
         "temperature": 0.75,
         "stream": True,
         "stream_options": {"include_usage": True},   # 末尾 chunk 返回 token 用量
@@ -170,8 +185,9 @@ async def generate_stream(emotion: dict, user_message: str = "",
         if full_content.strip():
             llm_breaker.record_success()
             metrics.record_llm("reply_stream", latency, success=True)
+            extra = {"messages": payload["messages"]} if include_messages else {}
             yield {"type": "done", "content": full_content.strip(), "source": "llm",
-                   "model": used_model, "usage": usage}
+                   "model": used_model, "usage": usage, **extra}
         else:
             # LLM 流式返回为空
             llm_breaker.record_failure("stream returned empty")

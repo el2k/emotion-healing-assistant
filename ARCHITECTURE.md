@@ -24,9 +24,10 @@ emotion-healing-assistant/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py            # FastAPI 入口：注册全部路由、CORS、初始管理员、托管 dist
-│   │   ├── config.py          # Settings（.env 读取：端口/JWT/LLM/管理员）
-│   │   ├── database.py        # 引擎 + get_db 依赖 + 轻量列迁移 _ensure_columns()
-│   │   ├── models.py          # 13 张表全部在这一个文件里（含 llm_models / llm_usage_logs，见 §4）
+│   │   ├── config.py          # Settings（.env 读取：端口/JWT/LLM/管理员/DATABASE_URL）
+│   │   ├── database.py        # 引擎（PostgreSQL 优先/SQLite 回落双驱动，池 5+5+pre_ping）+ get_db
+│   │   ├── migrate_to_pg.py   # SQLite → PostgreSQL 一次性数据迁移（依赖序/bool转换/序列对齐/幂等）
+│   │   ├── models.py          # 15 张表全部在这一个文件里（含 llm_models / llm_usage_logs / agent_trace_logs，见 §4）
 │   │   ├── schemas.py         # Pydantic 入参模型
 │   │   ├── security.py        # JWT 签发/校验 + PBKDF2 密码哈希
 │   │   ├── deps.py            # get_current_user / require_admin 依赖注入
@@ -56,6 +57,7 @@ emotion-healing-assistant/
 │   │   │   ├── llm_reply.py   #   LLM 回复生成（系统提示组装 + 模型参数 + usage 回传）+ 模板降级
 │   │   │   ├── llm_models.py  #   模型池：配置/默认解析/用户选择校验（首启种子 4 个通义千问）
 │   │   │   ├── llm_usage.py   #   LLM token 用量落库（按模型/场景；无 usage 时文本估算兕底）
+│   │   │   ├── tracer.py      #   Agent 链路追踪（参考 dsAgent @AgentTrace 的 Python 化：span 上下文管理器 + 异步落库）
 │   │   │   ├── wiki_service.py#   记忆维基编译（LLM 通道 + 规则兜底）
 │   │   │   ├── profile_service.py # 用户画像（统计派）
 │   │   │   ├── healing_templates.py # 危机回复模板
@@ -153,9 +155,11 @@ emotion-healing-assistant/
 
 ---
 
-## 4. 数据模型（11 张表）
+## 4. 数据模型（16 张表）
 
-所有表定义在 `models.py`，用 SQLAlchemy Declarative。SQLite 单文件，`init_db()` 时 `create_all` + 轻量列迁移（新增列不删库）。
+所有表定义在 `models.py`，用 SQLAlchemy Declarative。**生产库为 PostgreSQL**（接入已有实例，`DATABASE_URL` 配置；SQLite 仅作开发/测试回落，测试用例强制隔离）。`init_db()` 时 `create_all`；SQLite 模式另跑轻量列迁移（新增列不删库）。
+
+**时间约定**：所有时间列 `DateTime(timezone=True)`（PG 为 timestamptz），库内存 UTC；接口输出带 `+00:00`，前端按 Asia/Shanghai 渲染。
 
 | 表名 | 关键字段 | 用途 |
 |---|---|---|

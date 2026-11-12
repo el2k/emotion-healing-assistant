@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """论坛 + 多智能体角色 测试。"""
 import os
+# 测试隔离：锁定 SQLite 模式（backend/.env 的 DATABASE_URL 若指向 PG，会导致测试连错库）
+os.environ["DATABASE_URL"] = ""
 import tempfile
 import time
 

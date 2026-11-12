@@ -1,25 +1,51 @@
 # -*- coding: utf-8 -*-
-"""SQLite 数据库引擎与会话管理。"""
+"""数据库引擎与会话管理：双驱动（PostgreSQL 优先 / SQLite 回落）。
+
+- DATABASE_URL 配置了 PostgreSQL 时走 psycopg 驱动：
+  连接池 5 常驻 + 5 溢出（服务端总上限 100、多项目共享，本项目不超过 10），
+  pool_pre_ping 防止共享实例上空闲连接被回收导致的第一请求失败；
+- 否则回落本地 SQLite（开发/测试模式，行为与历史版本一致）。
+- 时间约定：库内一律存 UTC（timestamptz）；展示时区（Asia/Shanghai）由应用层转换。
+"""
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import BASE_DIR, settings
 
-# 确保数据目录存在
+# 确保数据目录存在（SQLite 模式需要）
 DATA_DIR = BASE_DIR / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-DB_PATH = settings.DB_PATH
-if DB_PATH.startswith("sqlite:///"):
-    DATABASE_URL = DB_PATH
-else:
-    DATABASE_URL = f"sqlite:///{DB_PATH}"
+IS_POSTGRES = bool(settings.DATABASE_URL)
 
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    echo=False,
-)
+
+def _build_engine():
+    if IS_POSTGRES:
+        url = settings.DATABASE_URL
+        # 统一使用 psycopg3 驱动标识（兼容 postgresql:// / postgres:// 前缀）
+        for prefix in ("postgresql://", "postgres://"):
+            if url.startswith(prefix):
+                url = "postgresql+psycopg://" + url[len(prefix):]
+                break
+        return create_engine(
+            url,
+            echo=False,
+            pool_size=5,          # 常驻连接
+            max_overflow=5,       # 峰值溢出（合计 ≤10，多项目共享 100 上限内）
+            pool_pre_ping=True,   # 取连接前探活，规避共享实例断连
+            pool_recycle=1800,    # 30 分钟回收，避免长连接被服务端掐断
+        )
+    db_path = settings.DB_PATH
+    url = db_path if db_path.startswith("sqlite:///") else f"sqlite:///{db_path}"
+    return create_engine(
+        url,
+        connect_args={"check_same_thread": False},
+        echo=False,
+    )
+
+
+DATABASE_URL = settings.DATABASE_URL  # 向后兼容引用（SQLite 模式下为空串）
+engine = _build_engine()
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
@@ -60,10 +86,16 @@ _COLUMNS = {
         "points": "INTEGER DEFAULT 999999",
         "llm_model": "VARCHAR(64) DEFAULT ''",
     },
+    "messages": {
+        "trace_id": "VARCHAR(36) DEFAULT ''",
+    },
 }
 
 
 def _ensure_columns() -> None:
+    # SQLite 专属的轻量补列迁移；PG 模式下表结构由迁移工具/建表统一管理，跳过
+    if IS_POSTGRES:
+        return
     from sqlalchemy import inspect, text
     insp = inspect(engine)
     with engine.begin() as conn:

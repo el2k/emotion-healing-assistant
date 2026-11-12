@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """端到端 API 测试（用 TestClient，无需启动真实服务）。"""
 import os
+# 测试隔离：锁定 SQLite 模式（backend/.env 的 DATABASE_URL 若指向 PG，会导致测试连错库）
+os.environ["DATABASE_URL"] = ""
 import tempfile
 import time
 

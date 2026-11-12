@@ -141,6 +141,9 @@
               </div>
               <span class="ac-go">{{ actionGo(m.action) }}</span>
             </div>
+            <div v-if="m.role === 'assistant' && m.trace_id" class="b-trace"
+                 title="查看这条回复的处理链路（模型怎么一步步回复你的）"
+                 @click="openTrace(m.trace_id)">🔬 处理链路</div>
           </div>
         </div>
 
@@ -194,6 +197,9 @@
         <p class="calib-note">你的校准会记录到个人档案，并让后续识别更懂你。</p>
       </div>
     </div>
+
+    <!-- Agent 处理链路抽屉 -->
+    <TraceDrawer :show="traceShow" :trace-id="traceId" @close="traceShow = false" />
   </div>
 </template>
 
@@ -202,6 +208,7 @@ import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { api } from '../api'
+import TraceDrawer from '../components/TraceDrawer.vue'
 
 const router = useRouter()
 const auth = useAuthStore()
@@ -263,6 +270,14 @@ const msgBox = ref(null)
 const daily = ref(null)
 const dailyDismissed = ref(false)
 const preview = ref('')
+
+/* ========== Agent 处理链路（LLM 透明化） ========== */
+const traceShow = ref(false)
+const traceId = ref('')
+function openTrace(tid) {
+  traceId.value = tid
+  traceShow.value = true
+}
 
 /* 行动卡片：工具 / 知识文章 / 疗愈室 / 热线 */
 function actionGo(a) {
@@ -421,7 +436,7 @@ async function send() {
       const { data } = await api.post(`/chat/sessions/${currentId.value}/messages`, { content, model: selectedModel.value || undefined })
       messages.value = messages.value.filter((m) => m.id !== tmpId)
       messages.value.push({ ...data.user_message })
-      messages.value.push({ ...data.reply, action: data.action || null, flow: data.flow || null })
+      messages.value.push({ ...data.reply, action: data.action || null, flow: data.flow || null, trace_id: data.trace_id || data.reply?.trace_id || '' })
       lastEmotion.value = {
         type: data.emotion.emotion_type,
         polarity: data.emotion.polarity,
@@ -504,9 +519,9 @@ async function sendStream(content, tmpId) {
           }
           scrollDown()
         } else if (evt.type === 'done') {
-          // 完结：替换为正式回复
+          // 完结：替换为正式回复（附 trace_id 供链路回看）
           messages.value = messages.value.filter((m) => m.id !== streamReplyId)
-          messages.value.push({ ...evt.reply, action: meta?.action || null, flow: meta?.flow || null })
+          messages.value.push({ ...evt.reply, action: meta?.action || null, flow: meta?.flow || null, trace_id: evt.trace_id || '' })
           typing.value = false
           await loadSessions()
           scrollDown()
@@ -730,6 +745,12 @@ onBeforeUnmount(() => { recognition?.stop() })
 .bubble { max-width: 68%; padding: 12px 16px; border-radius: 16px; font-size: 15px; word-break: break-word; }
 .msg-row.user .bubble { background: linear-gradient(135deg, var(--primary), #9b8cf0); color: #fff; border-bottom-right-radius: 4px; }
 .msg-row.assistant .bubble { background: #fff; border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.b-trace {
+  display: inline-flex; align-items: center; gap: 4px; margin-top: 7px; padding: 3px 10px;
+  border-radius: 10px; font-size: 11px; color: #6f63b8; background: #f6f2fc;
+  border: 1px solid #ebe3f8; cursor: pointer; user-select: none; transition: all .15s;
+}
+.b-trace:hover { background: #efe8fa; color: #453a92; }
 .b-img { max-width: 240px; border-radius: 10px; margin-bottom: 6px; cursor: zoom-in; display: block; }
 .b-text { white-space: pre-wrap; }
 .b-tags { margin-top: 8px; display: flex; align-items: center; gap: 8px; }

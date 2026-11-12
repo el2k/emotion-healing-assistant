@@ -2,6 +2,8 @@
 """新功能测试：长周期画像、每日小结、AI洞察、图片上传。"""
 import io
 import os
+# 测试隔离：锁定 SQLite 模式（backend/.env 的 DATABASE_URL 若指向 PG，会导致测试连错库）
+os.environ["DATABASE_URL"] = ""
 import tempfile
 import time
 
@@ -928,7 +930,8 @@ def test_llm_usage_recorded(client):
                           "total_tokens": 100}}
 
     async def fake_call_llm(emotion, user_message, history, profile_text, intent,
-                            persona_id, strategy_text="", length_text="", model=None):
+                            persona_id, strategy_text="", length_text="", model=None,
+                            knowledge_text=""):
         return "打桩回复", {"prompt_tokens": 200, "completion_tokens": 50,
                             "total_tokens": 250}
 
@@ -1008,6 +1011,9 @@ def test_prompt_management(client):
                        json={"personality": "温柔（测试编辑）",
                              "voice": {"pos": ["测试正向语料"]}})
         assert r.status_code == 200, r.text
+        # 本次修改前自动备份的是原始状态，后面用它做确定性恢复（不依赖排序）
+        pristine_backup = r.json()["backup"]
+        assert pristine_backup
         assert "温柔（测试编辑）" in r.json()["system_prompt"]
         assert "温柔（测试编辑）" in P.system_prompt("nuan")
         assert P.get("nuan")["voice"]["pos"] == ["测试正向语料"]
@@ -1037,11 +1043,13 @@ def test_prompt_management(client):
         assert "温柔（测试编辑）" not in P.system_prompt("nuan")   # 已回到编辑前
 
         # 6) 备份 + 恢复 + 路径穿越拒绝
+        #    恢复明确指定「原始状态备份」，避免同秒多备份的排序不确定性（曾致 flaky）
         ov = client.get("/api/admin/prompts/overview", headers=ah).json()
         assert ov["backups"], "编辑与保存应自动产生备份"
-        name = ov["backups"][0]["name"]
+        assert any(b["name"] == pristine_backup for b in ov["backups"])
         assert client.post("/api/admin/prompts/restore", headers=ah,
-                           json={"filename": name}).status_code == 200
+                           json={"filename": pristine_backup}).status_code == 200
+        assert P.get("nuan")["personality"] == "温柔、耐心、包容，善于倾听，从不评判"  # 原始状态
         assert client.post("/api/admin/prompts/restore", headers=ah,
                            json={"filename": "../../etc/passwd"}).status_code == 400
 

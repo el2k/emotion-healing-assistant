@@ -33,7 +33,7 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     points = Column(Integer, default=999999)            # 积分（聊天消耗，每日可领）
     llm_model = Column(String(64), default="")          # 用户偏好的模型（空=用默认）
-    created_at = Column(DateTime, default=_utcnow)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
 
     sessions = relationship("ChatSession", back_populates="user",
                             cascade="all, delete-orphan")
@@ -46,8 +46,8 @@ class ChatSession(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
     title = Column(String(100), default="新的对话")
     persona_id = Column(String(32), default="nuan")     # 多智能体角色
-    created_at = Column(DateTime, default=_utcnow)
-    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
     user = relationship("User", back_populates="sessions")
     messages = relationship("Message", back_populates="session",
@@ -64,6 +64,7 @@ class Message(Base):
     content = Column(Text, nullable=False)
     msg_type = Column(String(16), default="text")       # text / image / voice
     image_url = Column(String(255), default="")         # 图片消息的地址
+    trace_id = Column(String(36), default="", index=True)  # Agent 链路 ID（assistant 消息；持久化供随时回看）
 
     # 情绪相关（仅记录在用户消息上）
     emotion_type = Column(String(32), default="中性")   # 见 emotion/analyzer.py 类别
@@ -71,7 +72,7 @@ class Message(Base):
     emotion_source = Column(String(16), default="rule") # rule / llm
     detail = Column(Text, default="")                   # JSON 明细
 
-    created_at = Column(DateTime, default=_utcnow)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
 
     session = relationship("ChatSession", back_populates="messages")
 
@@ -90,7 +91,7 @@ class EmotionRecord(Base):
     intent = Column(String(16), default="")             # 倾诉/求助/分享/闲聊/危机
     trigger = Column(String(120), default="")           # 触发情绪的原话片段（事件）
     detail = Column(Text, default="")
-    created_at = Column(DateTime, default=_utcnow, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class EmotionCalibration(Base):
@@ -104,7 +105,7 @@ class EmotionCalibration(Base):
     original_emotion = Column(String(32), default="")   # 系统原判
     corrected_emotion = Column(String(32), nullable=False)  # 用户校准结果
     text = Column(String(200), default="")              # 原话片段
-    created_at = Column(DateTime, default=_utcnow, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class ForumPost(Base):
@@ -118,7 +119,7 @@ class ForumPost(Base):
     tags = Column(String(200), default="")              # 逗号分隔
     image_urls = Column(Text, default="")               # JSON 数组字符串
     blocks = Column(Text, default="")                   # JSON：图文混排块（text/image/video）
-    created_at = Column(DateTime, default=_utcnow, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class ForumLike(Base):
@@ -127,7 +128,7 @@ class ForumLike(Base):
     id = Column(Integer, primary_key=True, index=True)
     post_id = Column(Integer, ForeignKey("forum_posts.id", ondelete="CASCADE"), index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    created_at = Column(DateTime, default=_utcnow)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
 
 
 class ForumComment(Base):
@@ -137,7 +138,7 @@ class ForumComment(Base):
     post_id = Column(Integer, ForeignKey("forum_posts.id", ondelete="CASCADE"), index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
     content = Column(Text, default="")
-    created_at = Column(DateTime, default=_utcnow, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class PointsLedger(Base):
@@ -150,7 +151,7 @@ class PointsLedger(Base):
     balance = Column(Integer, default=0)                # 变动后余额（冗余，便于审计）
     reason = Column(String(32), default="")             # daily_claim / chat / admin_adjust
     note = Column(String(200), default="")
-    created_at = Column(DateTime, default=_utcnow, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class UserWikiEntry(Base):
@@ -172,8 +173,8 @@ class UserWikiEntry(Base):
     confidence = Column(Float, default=0.6)              # 0~1
     pinned = Column(Boolean, default=False)              # 用户置顶/确认的事实
     hits = Column(Integer, default=1)                    # 同类事实被提及次数（用于置信度成长）
-    created_at = Column(DateTime, default=_utcnow)
-    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class PaymentOrder(Base):
@@ -188,8 +189,8 @@ class PaymentOrder(Base):
     plan_id = Column(String(16), default="")             # 套餐 ID
     status = Column(String(16), default="pending", index=True)  # pending / paid / cancelled
     trade_no = Column(String(64), default="")            # 第三方支付流水号
-    created_at = Column(DateTime, default=_utcnow)
-    paid_at = Column(DateTime)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    paid_at = Column(DateTime(timezone=True))
 
 
 class KnowledgeArticle(Base):
@@ -205,7 +206,7 @@ class KnowledgeArticle(Base):
     source = Column(String(200), default="")            # 参考来源
     read_minutes = Column(Integer, default=3)
     views = Column(Integer, default=0)
-    created_at = Column(DateTime, default=_utcnow, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
 
 
 class LLMModel(Base):
@@ -224,8 +225,8 @@ class LLMModel(Base):
     is_default = Column(Boolean, default=False)         # 默认模型（全局唯一）
     free_quota_tokens = Column(Integer, default=0)      # 免费额度（token，0=未配置）
     sort_order = Column(Integer, default=0)
-    created_at = Column(DateTime, default=_utcnow)
-    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    created_at = Column(DateTime(timezone=True), default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
 
 
 class LLMUsageLog(Base):
@@ -240,4 +241,38 @@ class LLMUsageLog(Base):
     completion_tokens = Column(Integer, default=0)
     total_tokens = Column(Integer, default=0)               # 消耗的 token（花费）
     success = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=_utcnow, index=True)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)
+
+
+class AgentTraceLog(Base):
+    """Agent 链路追踪节点（参考 dsAgent 的 llm-trace-log 设计，Python 版）。
+
+    一条用户消息（一个 trace_id）→ 多个节点（execution_order 递增）：
+    规则情绪 → LLM 情绪 → 意图 → 记忆画像 → 会话策略 → LLM 回复 → 落库。
+    每个节点记录进入/离开时间、耗时、成败、入参/出参 JSON、异常，
+    让 LLM 管线不再是黑盒。
+    """
+    __tablename__ = "agent_trace_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    trace_id = Column(String(36), index=True, nullable=False)   # 一次消息处理链路 ID
+    session_id = Column(Integer, index=True, nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    message_id = Column(Integer, index=True, nullable=True)     # 关联的 AI 回复消息 ID
+
+    node_key = Column(String(48), nullable=False)               # RULE_EMOTION / LLM_REPLY ...
+    node_type = Column(String(24), default="General")           # Emotion / LLM / Intent / Memory ...
+    node_name = Column(String(64), default="")                  # 人类可读名称
+    execution_order = Column(Integer, default=0)                # 同链路内顺序
+
+    enter_time = Column(DateTime(timezone=True), default=_utcnow)
+    leave_time = Column(DateTime(timezone=True))
+    duration_ms = Column(Integer, default=0)                    # 节点耗时（毫秒）
+    result = Column(Integer, default=1)                         # 1 成功 / 0 失败
+
+    input_str = Column(Text, default="")                        # 入参 JSON
+    output_str = Column(Text, default="")                       # 出参 JSON
+    error_msg = Column(Text, default="")                        # 异常信息
+    detail = Column(Text, default="")                           # 额外信息（模型/tokens 等）
+
+    created_at = Column(DateTime(timezone=True), default=_utcnow, index=True)

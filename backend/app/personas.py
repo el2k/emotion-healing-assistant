@@ -843,11 +843,16 @@ def list_prompt_backups() -> list[dict]:
     if not HISTORY_DIR.exists():
         return []
     out = []
-    for f in sorted(HISTORY_DIR.glob("personas-*.md"), reverse=True):
+    for f in sorted(HISTORY_DIR.glob("personas-*.md")):
         st = f.stat()
         out.append({"name": f.name,
                     "updated_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
-                    "size": st.st_size})
+                    "size": st.st_size,
+                    "_mtime": st.st_mtime})
+    # 按真实修改时间倒序（同一秒内的多个备份按 mtime 亚秒精度区分，避免文件名排序歧义）
+    out.sort(key=lambda x: (-x["_mtime"], x["name"]))
+    for o in out:
+        o.pop("_mtime")
     return out
 
 

@@ -2,6 +2,8 @@
 """情绪引擎单元测试：python -m tests.test_analyzer"""
 import asyncio
 import os
+# 测试隔离：锁定 SQLite 模式（backend/.env 的 DATABASE_URL 若指向 PG，会导致测试连错库）
+os.environ["DATABASE_URL"] = ""
 
 # 测试隔离：禁用真实 LLM 调用（「双引擎降级」断言依赖未配置状态）
 os.environ["LLM_ENABLED"] = "false"

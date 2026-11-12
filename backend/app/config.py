@@ -34,7 +34,8 @@ class Settings:
     PORT = int(os.getenv("PORT", "8000"))
     DEBUG = _bool("DEBUG", True)
 
-    # --- 数据库 ---
+    # --- 数据库（优先 DATABASE_URL=PostgreSQL；缺省回落 DB_PATH=SQLite）---
+    DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
     DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "data" / "healing.db"))
 
     # --- 认证 ---

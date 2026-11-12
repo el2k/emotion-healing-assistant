@@ -34,3 +34,32 @@ def detect(text: str, high_risk: bool = False) -> str:
             if kw in text:
                 return intent
     return "倾诉"  # 默认按倾诉处理（治愈助手场景）
+
+
+# 意图优先级（供解释输出）
+_PRIORITY = ["危机", "求助", "倾诉", "分享", "闲聊"]
+
+
+def explain(text: str, high_risk: bool = False) -> dict:
+    """意图判定过程解释（供 Agent 链路追踪展示，不影响 detect 主逻辑）。
+
+    返回：{intent, path, hits} — path 为判定路径，hits 为命中的关键词及所属意图。
+    """
+    if high_risk:
+        return {"intent": "危机", "path": "情绪引擎高风险 → 直接判定危机",
+                "hits": [{"keyword": "(high_risk)", "intent": "危机"}]}
+    text = text or ""
+    all_hits = [{"keyword": kw, "intent": label}
+                for label in _PRIORITY for kw in INTENT_KEYWORDS.get(label, [])
+                if kw in text]
+    # 全部命中按优先级排序展示
+    order_idx = {label: i for i, label in enumerate(_PRIORITY)}
+    all_hits.sort(key=lambda h: order_idx.get(h["intent"], 99))
+    if all_hits:
+        # 与 detect 一致：最高优先级意图的第一个命中关键词触发判定
+        top = all_hits[0]
+        return {"intent": top["intent"],
+                "path": f"关键词命中「{top['keyword']}」→ {top['intent']}",
+                "hits": all_hits[:8]}
+    return {"intent": "倾诉", "path": "无关键词命中 → 默认倾诉（治愈场景兜底）",
+            "hits": []}

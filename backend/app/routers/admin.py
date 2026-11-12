@@ -1154,3 +1154,21 @@ def prompts_restore(data: PromptRestoreIn):
         raise HTTPException(400, f"恢复被拒绝：{e}")
     except FileNotFoundError:
         raise HTTPException(404, "备份不存在")
+
+
+# ============================================================
+# Agent 链路轨迹（审计视角：查看任意回复的处理链路）
+# ============================================================
+@router.get("/trace/{trace_id}")
+def admin_trace(trace_id: str, db: Session = Depends(get_db)):
+    """管理员查看任意链路（节点/耗时/入参/出参/模型与 tokens）。
+
+    含用户消息与画像文本，仅审计用途；请勿外发。轨迹异步落库，刚发的消息可能未就绪。
+    """
+    from ..services.tracer import trace_to_dict
+    from ..models import AgentTraceLog
+
+    if not (db.query(AgentTraceLog)
+            .filter(AgentTraceLog.trace_id == trace_id).first()):
+        raise HTTPException(404, "轨迹不存在（异步落库中或已清理，稍候重试）")
+    return trace_to_dict(trace_id)
